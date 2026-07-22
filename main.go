@@ -9,6 +9,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -24,6 +25,7 @@ import (
 	"jira-ai-issue-solver/recovery"
 	"jira-ai-issue-solver/scanner"
 	"jira-ai-issue-solver/services"
+	"jira-ai-issue-solver/services/hosting"
 	"jira-ai-issue-solver/taskfile"
 	"jira-ai-issue-solver/tracker/jira"
 	"jira-ai-issue-solver/workspace"
@@ -45,7 +47,28 @@ func main() {
 	// --- Infrastructure ---
 
 	jiraService := services.NewJiraService(config, logger)
-	gitService := services.NewGitHubService(config, logger)
+
+	// Build the VCS hosting router from per-project workspace config.
+	needsGitHub, needsGitLab := config.RequiredHostingProviders()
+
+	var ghService *services.GitHubServiceImpl
+	if needsGitHub {
+		ghService = services.NewGitHubService(config, logger)
+	}
+
+	var glService *services.GitLabServiceImpl
+	if needsGitLab {
+		glService = services.NewGitLabService(config, logger)
+	}
+
+	repoProviders := buildRepoProviderMap(config, ghService, glService)
+	var fallback hosting.Provider
+	if ghService != nil {
+		fallback = ghService
+	} else {
+		fallback = glService
+	}
+	gitService := hosting.NewRouter(repoProviders, fallback)
 
 	issueTracker, err := jira.NewAdapter(jiraService, logger)
 	if err != nil {
@@ -535,4 +558,47 @@ func appendUnique(slice []string, value string) []string {
 		}
 	}
 	return append(slice, value)
+}
+
+// buildRepoProviderMap iterates all configured projects/workspaces and
+// maps each repo URL's owner/repo to the correct hosting provider.
+func buildRepoProviderMap(
+	config *models.Config,
+	ghService *services.GitHubServiceImpl,
+	glService *services.GitLabServiceImpl,
+) map[string]hosting.Provider {
+	providers := make(map[string]hosting.Provider)
+
+	for _, project := range config.Jira.Projects {
+		for _, ws := range project.Workspaces {
+			var provider hosting.Provider
+			switch ws.HostingProvider() {
+			case models.HostingGitLab:
+				provider = glService
+			default:
+				provider = ghService
+			}
+			for _, repo := range ws.Repos {
+				owner, repoName := extractOwnerRepoFromURL(repo.URL)
+				if owner != "" && repoName != "" {
+					key := owner + "/" + repoName
+					providers[key] = provider
+				}
+			}
+		}
+	}
+
+	return providers
+}
+
+// extractOwnerRepoFromURL parses owner and repo from a clone URL.
+func extractOwnerRepoFromURL(repoURL string) (string, string) {
+	repoURL = strings.TrimSuffix(repoURL, ".git")
+	parts := strings.Split(repoURL, "/")
+	if len(parts) >= 5 {
+		repo := parts[len(parts)-1]
+		owner := strings.Join(parts[3:len(parts)-1], "/")
+		return owner, repo
+	}
+	return "", ""
 }

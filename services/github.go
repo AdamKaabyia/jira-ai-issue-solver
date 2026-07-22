@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -94,6 +93,7 @@ type GitHubServiceImpl struct {
 	executor             models.CommandExecutor
 	mergeRetryDelay      time.Duration
 	logger               *zap.Logger
+	gitOps               *GitOps
 }
 
 // gitCommand encapsulates a git command execution with optional stdout/stderr capture.
@@ -182,6 +182,7 @@ func NewGitHubService(config *models.Config, logger *zap.Logger, executor ...mod
 		executor:            commandExecutor,
 		mergeRetryDelay:     mergeabilityRetryDelay,
 		logger:              logger,
+		gitOps:              NewGitOps(commandExecutor, logger),
 	}
 
 	// Initialize GitHub App transport
@@ -441,67 +442,7 @@ func (s *GitHubServiceImpl) getAuthTokenForRepo(owner, repo string) (string, err
 
 // CreateBranch creates a new branch in a local repository based on the latest target branch
 func (s *GitHubServiceImpl) CreateBranch(directory, branchName, baseBranch string) error {
-	debugEnabled := s.logger.Core().Enabled(zapcore.DebugLevel)
-	fn := zap.String("function", "CreateBranch")
-
-	// Reset any dirty state left by a previous failed attempt.
-	resetCmd := newGitCommand(s.executor("git", "reset", "--hard", "HEAD"), directory, debugEnabled, true)
-	if err := resetCmd.run(); err != nil {
-		s.logger.Warn("git reset --hard HEAD failed (non-fatal)",
-			fn, zap.Error(err), zap.String("stderr", resetCmd.getStderr()))
-	}
-
-	// Fetch the latest changes from origin
-	cmd := newGitCommand(s.executor("git", "fetch", "origin"), directory, debugEnabled, true)
-
-	if err := cmd.run(); err != nil {
-		return fmt.Errorf("failed to fetch origin: %w, stderr: %s", err, cmd.getStderr())
-	}
-
-	s.logger.Debug("git fetch origin", fn, zap.String("stdout", cmd.getStdout()), zap.String("stderr", cmd.getStderr()))
-
-	// Checkout the target branch
-	cmd = newGitCommand(s.executor("git", "checkout", baseBranch), directory, debugEnabled, true)
-
-	if err := cmd.run(); err != nil {
-		return fmt.Errorf("failed to checkout target branch %s: %w, stderr: %s", baseBranch, err, cmd.getStderr())
-	}
-
-	s.logger.Debug("git checkout", fn, zap.String("branch", baseBranch), zap.String("stdout", cmd.getStdout()), zap.String("stderr", cmd.getStderr()))
-
-	// Reset to the latest commit on the target branch to ensure we're up to date
-	cmd = newGitCommand(s.executor("git", "reset", "--hard", "origin/"+baseBranch), directory, debugEnabled, true)
-
-	if err := cmd.run(); err != nil {
-		return fmt.Errorf("failed to reset to latest commit on target branch %s: %w, stderr: %s", baseBranch, err, cmd.getStderr())
-	}
-	s.logger.Debug("git reset --hard", fn, zap.String("ref", "origin/"+baseBranch), zap.String("stdout", cmd.getStdout()), zap.String("stderr", cmd.getStderr()))
-
-	// Check if the branch already exists locally
-	cmd = newGitCommand(s.executor("git", "show-ref", "--verify", "--quiet", "refs/heads/"+branchName), directory, debugEnabled, true)
-
-	if err := cmd.run(); err == nil {
-		// Branch exists locally, delete it first
-		s.logger.Info("Branch already exists locally, deleting it", zap.String("branchName", branchName))
-		cmd = newGitCommand(s.executor("git", "branch", "-D", branchName), directory, debugEnabled, true)
-
-		if err := cmd.run(); err != nil {
-			return fmt.Errorf("failed to delete existing branch %s: %w, stderr: %s", branchName, err, cmd.getStderr())
-		}
-
-		s.logger.Debug("git branch -D", fn, zap.String("branch", branchName), zap.String("stdout", cmd.getStdout()), zap.String("stderr", cmd.getStderr()))
-	}
-
-	// Create a new branch from the current state
-	cmd = newGitCommand(s.executor("git", "checkout", "-b", branchName), directory, debugEnabled, true)
-
-	if err := cmd.run(); err != nil {
-		return fmt.Errorf("failed to create branch: %w, stderr: %s", err, cmd.getStderr())
-	}
-
-	s.logger.Debug("git checkout", fn, zap.String("operation", "-b"), zap.String("branch", branchName), zap.String("stdout", cmd.getStdout()), zap.String("stderr", cmd.getStderr()))
-
-	return nil
+	return s.gitOps.CreateBranch(directory, branchName, baseBranch)
 }
 
 // CommitChanges creates a verified commit via the GitHub API from local
@@ -1584,188 +1525,24 @@ func (s *GitHubServiceImpl) CreatePR(params models.PRParams) (*models.PR, error)
 
 // SwitchBranch switches to a specific branch.
 func (s *GitHubServiceImpl) SwitchBranch(directory, branchName string) error {
-	debugEnabled := s.logger.Core().Enabled(zapcore.DebugLevel)
-	fn := zap.String("function", "SwitchBranch")
-
-	// Reset any dirty state left by a previous failed attempt (e.g.,
-	// unresolved merge conflicts). Without this, git checkout fails
-	// with "you need to resolve your current index first."
-	resetCmd := newGitCommand(s.executor("git", "reset", "--hard", "HEAD"), directory, debugEnabled, true)
-	if err := resetCmd.run(); err != nil {
-		s.logger.Warn("git reset --hard HEAD failed (non-fatal)",
-			fn, zap.Error(err), zap.String("stderr", resetCmd.getStderr()))
-	}
-
-	// Fetch the latest changes from origin
-	cmd := newGitCommand(s.executor("git", "fetch", "origin"), directory, debugEnabled, true)
-
-	if err := cmd.run(); err != nil {
-		return fmt.Errorf("failed to fetch origin: %w, stderr: %s", err, cmd.getStderr())
-	}
-	s.logger.Debug("git fetch origin", fn, zap.String("stdout", cmd.getStdout()), zap.String("stderr", cmd.getStderr()))
-
-	// Checkout the specified branch
-	cmd = newGitCommand(s.executor("git", "checkout", branchName), directory, debugEnabled, true)
-
-	if err := cmd.run(); err != nil {
-		return fmt.Errorf("failed to checkout branch %s: %w, stderr: %s", branchName, err, cmd.getStderr())
-	}
-
-	s.logger.Debug("git checkout", fn, zap.String("branch", branchName), zap.String("stdout", cmd.getStdout()), zap.String("stderr", cmd.getStderr()))
-
-	return nil
+	return s.gitOps.SwitchBranch(directory, branchName)
 }
 
-// HasChanges checks if there are any uncommitted changes in the repository
-// Returns true if there are changes (modified, added, or deleted files)
 func (s *GitHubServiceImpl) HasChanges(directory, baseBranch string) (bool, error) {
-	fn := zap.String("function", "HasChanges")
-
-	// Check for working tree changes
-	hasWorkingTreeChanges, err := s.hasWorkingTreeChanges(directory, fn)
-	if err != nil {
-		return false, err
-	}
-	if hasWorkingTreeChanges {
-		return true, nil
-	}
-
-	// Check for unpushed commits (e.g., merge commits created by AI)
-	hasUnpushedCommits, err := s.hasUnpushedCommits(directory, baseBranch, fn)
-	if err != nil {
-		return false, err
-	}
-
-	return hasUnpushedCommits, nil
+	return s.gitOps.HasChanges(directory, baseBranch)
 }
 
-// hasWorkingTreeChanges checks if there are uncommitted changes in the working tree
-func (s *GitHubServiceImpl) hasWorkingTreeChanges(directory string, fn zapcore.Field) (bool, error) {
-	// Use git status --porcelain to get machine-readable status
-	// Empty output means no changes
-	// Always capture stdout since we need to check if there's output
-	cmd := newGitCommand(s.executor("git", "status", "--porcelain"), directory, true, true)
 
-	if err := cmd.run(); err != nil {
-		return false, fmt.Errorf("failed to check git status: %w, stderr: %s", err, cmd.getStderr())
-	}
-
-	s.logger.Debug("git status --porcelain", fn, zap.String("stdout", cmd.getStdout()), zap.String("stderr", cmd.getStderr()))
-
-	// If stdout is empty, there are no working tree changes
-	return cmd.hasStdout(), nil
-}
-
-// stageAndCommitLocal ensures all working tree and staged changes are
-// committed locally. This normalizes the three possible states an AI
-// session can leave behind (committed, staged, or unstaged) into a
-// single committed state that git diff-tree can see.
 func (s *GitHubServiceImpl) stageAndCommitLocal(directory string, fn zapcore.Field) error {
-	// Check for uncommitted changes (staged or unstaged).
-	statusCmd := newGitCommand(s.executor("git", "status", "--porcelain"), directory, true, true)
-	if err := statusCmd.run(); err != nil {
-		return fmt.Errorf("git status: %w, stderr: %s", err, statusCmd.getStderr())
-	}
-	if !statusCmd.hasStdout() {
-		// Everything is already committed.
-		return nil
-	}
-
-	s.logger.Debug("Staging uncommitted changes", fn)
-
-	addCmd := newGitCommand(s.executor("git", "add", "-A"), directory, false, true)
-	if err := addCmd.run(); err != nil {
-		return fmt.Errorf("git add -A: %w, stderr: %s", err, addCmd.getStderr())
-	}
-
-	commitCmd := newGitCommand(
-		s.executor("git", "commit", "-m", "AI changes (local only)"),
-		directory, false, true)
-	if err := commitCmd.run(); err != nil {
-		return fmt.Errorf("git commit: %w, stderr: %s", err, commitCmd.getStderr())
-	}
-
-	s.logger.Debug("Committed local changes", fn)
-	return nil
+	return s.gitOps.StageAndCommitLocal(directory, fn)
 }
 
-// hasUnpushedCommits checks if there are local commits that haven't been pushed to origin
-func (s *GitHubServiceImpl) hasUnpushedCommits(directory, baseBranch string, fn zapcore.Field) (bool, error) {
-	// First, check if origin remote exists
-	remoteCmd := newGitCommand(s.executor("git", "remote", "get-url", "origin"), directory, false, false)
-	if err := remoteCmd.run(); err != nil {
-		// No origin remote configured - this is fine, means no unpushed commits to check
-		s.logger.Debug("No origin remote configured", fn)
-		return false, nil
-	}
-
-	// Get the current branch name
-	// Always capture stdout since we need the output
-	branchCmd := newGitCommand(s.executor("git", "rev-parse", "--abbrev-ref", "HEAD"), directory, true, true)
-	if err := branchCmd.run(); err != nil {
-		return false, fmt.Errorf("failed to get current branch: %w, stderr: %s", err, branchCmd.getStderr())
-	}
-
-	branchName := strings.TrimSpace(branchCmd.getStdout())
-	if branchName == "" {
-		return false, fmt.Errorf("unable to determine current branch")
-	}
-
-	s.logger.Debug("Current branch", fn, zap.String("branch", branchName))
-
-	// Determine the remote ref to compare against: origin/<branch> if it
-	// exists, otherwise origin/<targetBranch> (the branch we forked from).
-	remoteRef := fmt.Sprintf("origin/%s", branchName)
-	remoteExistsCmd := newGitCommand(s.executor("git", "rev-parse", "--verify", remoteRef), directory, false, false)
-	if err := remoteExistsCmd.run(); err != nil {
-		// Remote branch doesn't exist. Compare against origin/<target>
-		// to check if HEAD has diverged (i.e., the AI made local commits).
-		remoteRef = fmt.Sprintf("origin/%s", baseBranch)
-		s.logger.Debug("Remote branch does not exist, comparing against target branch", fn,
-			zap.String("branch", branchName),
-			zap.String("targetRef", remoteRef))
-	}
-
-	// Check for commits that exist locally but not on the remote ref.
-	logCmd := newGitCommand(s.executor("git", "log", fmt.Sprintf("%s..HEAD", remoteRef), "--oneline"), directory, true, true)
-	if err := logCmd.run(); err != nil {
-		return false, fmt.Errorf("failed to check unpushed commits: %w, stderr: %s", err, logCmd.getStderr())
-	}
-
-	s.logger.Debug("git log ref..HEAD", fn,
-		zap.String("ref", remoteRef),
-		zap.String("stdout", logCmd.getStdout()),
-		zap.String("stderr", logCmd.getStderr()))
-
-	// If there's any output, we have unpushed commits
-	return logCmd.hasStdout(), nil
-}
 
 // StripRemoteAuth removes authentication credentials from the
 // workspace's origin remote URL. After this call, push operations
 // will be rejected by the remote.
 func (s *GitHubServiceImpl) StripRemoteAuth(directory string) error {
-	cmd := newGitCommand(s.executor("git", "remote", "get-url", "origin"), directory, false, true)
-	if err := cmd.run(); err != nil {
-		return fmt.Errorf("get remote URL: %w, stderr: %s", err, cmd.getStderr())
-	}
-
-	rawURL := strings.TrimSpace(cmd.getStdout())
-	parsed, err := url.Parse(rawURL)
-	if err != nil {
-		return fmt.Errorf("parse remote URL: %w", err)
-	}
-	parsed.User = nil
-
-	setCmd := newGitCommand(
-		s.executor("git", "remote", "set-url", "origin", parsed.String()),
-		directory, false, false)
-	if err := setCmd.run(); err != nil {
-		return fmt.Errorf("strip remote auth: %w, stderr: %s", err, setCmd.getStderr())
-	}
-
-	s.logger.Debug("Stripped remote auth", zap.String("directory", directory))
-	return nil
+	return s.gitOps.StripRemoteAuth(directory)
 }
 
 // RestoreRemoteAuth restores authentication credentials on the
@@ -1788,91 +1565,14 @@ func (s *GitHubServiceImpl) RestoreRemoteAuth(directory, owner, repo string) err
 	return nil
 }
 
-// SyncWithRemote reconciles the local workspace with the remote branch by
-// fetching and hard-resetting to the remote ref. Excluded artifact
-// directories are preserved across the reset because they are filtered
-// from API commits and therefore absent on the remote branch.
-// FetchRemote fetches all refs from the origin remote. Used in
-// fork-based workflows to make fork branches available in a
-// workspace that was originally cloned from upstream.
 func (s *GitHubServiceImpl) FetchRemote(directory string) error {
-	debugEnabled := s.logger.Core().Enabled(zapcore.DebugLevel)
-	fn := zap.String("function", "FetchRemote")
-
-	fetchCmd := newGitCommand(s.executor("git", "fetch", "origin"), directory, debugEnabled, true)
-	if err := fetchCmd.run(); err != nil {
-		return fmt.Errorf("failed to fetch from origin: %w, stderr: %s", err, fetchCmd.getStderr())
-	}
-	s.logger.Debug("git fetch origin", fn, zap.String("stdout", fetchCmd.getStdout()), zap.String("stderr", fetchCmd.getStderr()))
-
-	return nil
+	return s.gitOps.FetchRemote(directory)
 }
 
 func (s *GitHubServiceImpl) SyncWithRemote(directory, branch string, importExcludes []string) error {
-	fn := zap.String("function", "SyncWithRemote")
-
-	// Preserve excluded directories across the hard reset.
-	// The normalization commit tracks these files locally, but they
-	// are filtered from the API commit and absent on the remote —
-	// so git reset --hard would delete them.
-	excludes := mergeExcludes(importExcludes)
-	preserved := s.preserveExcludedDirs(directory, excludes, fn)
-
-	if err := s.FetchRemote(directory); err != nil {
-		return err
-	}
-
-	// Reset the working tree and index to match the remote branch.
-	debugEnabled := s.logger.Core().Enabled(zapcore.DebugLevel)
-	ref := "origin/" + branch
-	resetCmd := newGitCommand(s.executor("git", "reset", "--hard", ref), directory, debugEnabled, true)
-	if err := resetCmd.run(); err != nil {
-		return fmt.Errorf("failed to reset to %s: %w, stderr: %s", ref, err, resetCmd.getStderr())
-	}
-	s.logger.Debug("git reset --hard", fn, zap.String("ref", ref), zap.String("stdout", resetCmd.getStdout()), zap.String("stderr", resetCmd.getStderr()))
-
-	// Restore preserved directories after the reset.
-	s.restoreExcludedDirs(directory, preserved, fn)
-
-	return nil
+	return s.gitOps.SyncWithRemote(directory, branch, importExcludes)
 }
 
-// preserveExcludedDirs moves excluded artifact directories to temporary
-// names so they survive a git reset --hard. Returns the list of
-// directory base names that were successfully preserved.
-func (s *GitHubServiceImpl) preserveExcludedDirs(directory string, excludes []string, fn zapcore.Field) []string {
-	var preserved []string
-	for _, prefix := range excludes {
-		dir := strings.TrimSuffix(prefix, "/")
-		src := filepath.Join(directory, dir)
-		dst := filepath.Join(directory, dir+".preserve")
-
-		if _, err := os.Stat(src); err != nil {
-			continue
-		}
-		_ = os.RemoveAll(dst) // clean up any stale preserve dir
-		if err := os.Rename(src, dst); err != nil {
-			s.logger.Warn("Failed to preserve directory", fn,
-				zap.String("dir", dir), zap.Error(err))
-			continue
-		}
-		preserved = append(preserved, dir)
-	}
-	return preserved
-}
-
-// restoreExcludedDirs moves preserved artifact directories back to
-// their original names after a git reset --hard.
-func (s *GitHubServiceImpl) restoreExcludedDirs(directory string, preserved []string, fn zapcore.Field) {
-	for _, dir := range preserved {
-		src := filepath.Join(directory, dir+".preserve")
-		dst := filepath.Join(directory, dir)
-		if err := os.Rename(src, dst); err != nil {
-			s.logger.Warn("Failed to restore directory", fn,
-				zap.String("dir", dir), zap.Error(err))
-		}
-	}
-}
 
 // ReplyToComment replies to a specific PR review comment.
 // For line-based review comments, this creates a threaded reply.
@@ -2049,26 +1749,7 @@ func (s *GitHubServiceImpl) AddCommentReaction(owner, repo string, comment model
 // non-empty, the specified branch/tag/commit is checked out. This is a
 // shallow clone (depth 1) since import repos are read-only references.
 func (s *GitHubServiceImpl) CloneImport(url, destDir, ref string) error {
-	args := []string{"clone", "--depth", "1"}
-	if ref != "" {
-		args = append(args, "--branch", ref)
-	}
-	args = append(args, url, destDir)
-
-	cmd := s.executor("git", args...)
-	var stderr bytes.Buffer
-	cmd.Stderr = &stderr
-
-	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("git clone %s into %s: %w, stderr: %s", url, destDir, err, stderr.String())
-	}
-
-	s.logger.Debug("Cloned import repo",
-		zap.String("url", url),
-		zap.String("dest", destDir),
-		zap.String("ref", ref))
-
-	return nil
+	return s.gitOps.CloneImport(url, destDir, ref)
 }
 
 // fetchPRReviewCommentsPage fetches a single page of PR review comments
@@ -2813,46 +2494,7 @@ func (s *GitHubServiceImpl) SyncFork(forkOwner, repo, branch string) error {
 // and the list of conflicted file paths (conflict markers are left
 // in the working tree).
 func (s *GitHubServiceImpl) MergeBase(dir, branch, fetchURL string) ([]string, error) {
-	remote := "origin"
-	mergeRef := "origin/" + branch
-	if fetchURL != "" {
-		remote = fetchURL
-		mergeRef = "FETCH_HEAD"
-	}
-	fetchCmd := s.executor("git", "fetch", remote, branch)
-	fetchCmd.Dir = dir
-	if _, err := fetchCmd.CombinedOutput(); err != nil {
-		return nil, fmt.Errorf("git fetch %s %s: %w", remote, branch, err)
-	}
-
-	mergeOut, err := s.runMerge(dir, mergeRef)
-	if blockers := parseUntrackedBlockers(string(mergeOut)); err != nil && len(blockers) > 0 {
-		s.logger.Info("Removing untracked files blocking merge",
-			zap.Strings("files", blockers))
-		args := append([]string{"clean", "-f", "--"}, blockers...)
-		cleanCmd := s.executor("git", args...)
-		cleanCmd.Dir = dir
-		if cleanOut, cleanErr := cleanCmd.CombinedOutput(); cleanErr != nil {
-			return nil, fmt.Errorf("git clean blocking paths: %w, output: %s", cleanErr, string(cleanOut))
-		}
-		mergeOut, err = s.runMerge(dir, mergeRef)
-	}
-	if err != nil {
-		conflictFiles := s.listConflictFiles(dir)
-		if len(conflictFiles) > 0 {
-			return conflictFiles, fmt.Errorf("%w: conflicted files: %v", ErrMergeConflict, conflictFiles)
-		}
-		return nil, fmt.Errorf("git merge %s failed: %w, output: %s", mergeRef, err, string(mergeOut))
-	}
-
-	return []string{}, nil
-}
-
-func (s *GitHubServiceImpl) runMerge(dir, mergeRef string) ([]byte, error) {
-	mergeCmd := s.executor("git", "merge", "--no-edit", mergeRef)
-	mergeCmd.Dir = dir
-	out, err := mergeCmd.CombinedOutput()
-	return out, err
+	return s.gitOps.MergeBase(dir, branch, fetchURL)
 }
 
 // parseUntrackedBlockers extracts file paths from git's
@@ -2878,32 +2520,6 @@ func parseUntrackedBlockers(output string) []string {
 	return paths
 }
 
-// listConflictFiles returns file paths with unresolved merge conflicts
-// by parsing git status porcelain output for unmerged entries.
-func (s *GitHubServiceImpl) listConflictFiles(dir string) []string {
-	cmd := s.executor("git", "status", "--porcelain")
-	cmd.Dir = dir
-	out, err := cmd.Output()
-	if err != nil {
-		return []string{}
-	}
-
-	var files []string
-	for _, line := range strings.Split(string(out), "\n") {
-		if len(line) < 4 {
-			continue
-		}
-		xy := line[:2]
-		if xy == "UU" || xy == "AA" || xy == "DD" ||
-			xy == "AU" || xy == "UA" || xy == "DU" || xy == "UD" {
-			files = append(files, strings.TrimSpace(line[3:]))
-		}
-	}
-	if files == nil {
-		files = []string{}
-	}
-	return files
-}
 
 // GetPRMergeability fetches the mergeability status of a pull request.
 // GitHub computes mergeability asynchronously; the first GET triggers

@@ -24,7 +24,8 @@ The application uses consumer-defined interfaces and clear package boundaries:
 - **`commentfilter/`** — Shared bot-loop prevention (ignored users, known bots, thread depth limits)
 - **`recovery/`** — `StartupRunner` for crash recovery (orphan container cleanup, stuck ticket reset, workspace TTL)
 - **`costtracker/`** — `FileTracker` for daily AI session cost tracking with budget enforcement
-- **`services/`** — Infrastructure implementations: `JiraService` (Jira REST API), `GitHubService` (GitHub App auth, Git Data API, PR operations)
+- **`services/`** — Infrastructure implementations: `JiraService` (Jira REST API), `GitHubService` (GitHub App auth, Git Data API, PR operations), `GitLabService` (GitLab PAT auth, MR operations), `GitOps` (shared provider-agnostic git commands)
+- **`services/hosting/`** — `Router` that dispatches VCS operations to the correct backend (GitHub or GitLab) based on owner/repo mapping from project config
 - **`models/`** — Configuration (`Config`), Jira API types, domain types (`WorkItem`, `SearchCriteria`, `ProjectSettings`)
 
 ### Design Principles
@@ -50,6 +51,8 @@ Key configuration features:
 - `GetProjectConfigForTicket()` retrieves the appropriate project config based on ticket key
 - `StatusTransitions` maps ticket types to their workflow statuses (todo, in_progress, in_review, and optionally merged)
 - **Workspaces** group one or more repos into a named working environment. A single-repo project is a workspace with one entry. Multi-repo workspaces clone all repos into subdirectories and run one AI session against the whole workspace. An optional `root_repo` URL clones a scaffold repo as the workspace root before child repos are placed inside it; the scaffold provides context files (e.g., CLAUDE.md) but is never branched, committed to, or PR'd.
+- **Hosting**: Each workspace declares a `hosting` field (`"github"` or `"gitlab"`, defaults to `"github"`). The hosting router in `services/hosting/` dispatches VCS operations to the correct backend based on this setting.
+- **GitLab configuration**: When any workspace uses `hosting: gitlab`, the top-level `gitlab` section must be configured with `base_url`, `access_token`, `bot_username`, and `bot_email`. Auth uses Personal Access Tokens (PAT) or Project/Group Access Tokens.
 - **Profiles** bundle container, imports, instructions, and workflow settings. Repos within workspaces reference profiles by name. Profile settings override repo-level `.ai-bot/` files when set, enabling prototyping without committing to the source repo.
 - `Components` maps Jira component names to workspaces (case-insensitive). `DefaultWorkspace` is used when tickets have no matching component.
 - **Fork mode**: `fork_mode: true` on a project config requires fork-based contributions. Commits are pushed to the assignee's fork (looked up via `jira.assignee_to_github_username`) and PRs are created as cross-repo PRs. When disabled (default), commits go directly to the upstream repo. Missing assignee mappings in fork-mode projects apply the `fork_user_missing` failure label and skip the ticket.
@@ -290,6 +293,8 @@ stub := &executortest.StubPipeline{
 Environment variables follow the pattern `JIRA_AI_<SECTION>_<FIELD>`:
 - `JIRA_AI_JIRA_BASE_URL` -> `jira.base_url`
 - `JIRA_AI_GITHUB_APP_ID` -> `github.app_id`
+- `JIRA_AI_GITLAB_BASE_URL` -> `gitlab.base_url`
+- `JIRA_AI_GITLAB_ACCESS_TOKEN` -> `gitlab.access_token`
 - `JIRA_AI_AI_PROVIDER` -> `ai_provider`
 - `JIRA_AI_WORKSPACES_BASE_DIR` -> `workspaces.base_dir`
 - `JIRA_AI_GUARDRAILS_MAX_CONCURRENT_JOBS` -> `guardrails.max_concurrent_jobs`
@@ -300,7 +305,8 @@ See `models/config.go` LoadConfig() for complete environment variable binding.
 
 - `main.go`: Application entry point, service wiring, HTTP server, graceful shutdown
 - `models/`: Configuration and data structures (Jira types, domain types)
-- `services/`: Infrastructure service implementations (Jira REST API, GitHub App/Git Data API)
+- `services/`: Infrastructure service implementations (Jira REST API, GitHub App/Git Data API, GitLab PAT/MR API, shared GitOps)
+- `services/hosting/`: Multi-provider routing (dispatches to GitHub or GitLab based on workspace config)
 - `tracker/`: IssueTracker interface and Jira adapter
 - `workspace/`: Ticket-scoped workspace management
 - `container/`: Container runtime detection, image resolution, lifecycle management

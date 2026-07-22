@@ -125,6 +125,15 @@ jira:
               profile: go-dev
               target_branch: master  # older repos may use "master"
 
+        # GitLab workspace: set hosting to "gitlab" for repos on GitLab.
+        # Requires the gitlab section to be configured above.
+        # gitlab-backend:
+        #   hosting: gitlab
+        #   repos:
+        #     - name: backend
+        #       url: https://gitlab.com/your-org/backend.git
+        #       profile: go-dev
+
         # Multi-repo workspace: all repos cloned into subdirectories
         # of the workspace and mounted into a single container.
         # Requires a workspace-level container with all toolchains.
@@ -329,6 +338,79 @@ github:
   ignored_check_names:
     # - "license/cla"
     # - "codecov/patch"
+
+# GitLab Configuration (OPTIONAL — only required when workspaces use hosting: gitlab)
+#
+# Uses Personal Access Token (PAT) or Project/Group Access Token for
+# authentication. Unlike GitHub App auth, GitLab tokens are simpler to
+# set up: create a token with the right scopes and paste it here.
+#
+# Token types (choose one):
+#   - Personal Access Token: tied to a user account. Simplest for testing.
+#     Create at: https://YOUR-GITLAB/-/user_settings/personal_access_tokens
+#   - Project Access Token: tied to a specific project. Survives employee
+#     offboarding. Create at: Project > Settings > Access Tokens.
+#   - Group Access Token: covers all projects in a group. Best for multi-repo.
+#     Create at: Group > Settings > Access Tokens.
+#
+# Required token scopes: api, read_repository, write_repository
+#
+# See docs/gitlab-support.md for full deployment guide.
+#
+# gitlab:
+#   # Base URL of the GitLab instance (REQUIRED when using GitLab hosting)
+#   # For gitlab.com: "https://gitlab.com"
+#   # For self-managed: "https://gitlab.your-company.com"
+#   base_url: "https://gitlab.com"
+#
+#   # Access token (REQUIRED)
+#   # The token must have scopes: api, read_repository, write_repository
+#   # Environment variable: JIRA_AI_GITLAB_ACCESS_TOKEN
+#   access_token: "glpat-xxxxxxxxxxxxxxxxxxxx"
+#
+#   # Bot identity for git commits (REQUIRED)
+#   # These appear as the commit author on merge requests.
+#   # For project tokens, use the token name and a team email.
+#   # For personal tokens, use your bot account's name and email.
+#   bot_username: "ai-bot"
+#   bot_email: "ai-bot@example.com"
+#
+#   # Default label applied to merge requests created by the bot.
+#   # Useful for filtering bot MRs in GitLab's MR list.
+#   mr_label: ai-mr
+#
+#   # Optional: Path to SSH private key for commit signing.
+#   # When set, commits are signed with this key and show as "Verified"
+#   # in GitLab (requires the public key to be added to the bot account).
+#   # ssh_key_path: "/path/to/ssh_signing_key"
+#
+#   # GitLab label that tells the bot to skip an MR entirely.
+#   # When this label is present on an MR, the bot will not process review
+#   # comments, CI failures, or merge conflicts for that MR. Removing the
+#   # label re-enables processing on the next scan cycle.
+#   # Set to empty string to disable the feature.
+#   skip_mr_label: ai-bot-skip
+#
+#   # Bot loop prevention settings
+#   # Maximum number of bot replies allowed in a single discussion thread.
+#   # Prevents infinite loops when two bots reply to each other.
+#   max_thread_depth: 5
+#
+#   # Known bot usernames — prevents bot-to-bot conversation loops.
+#   # Comments from these users are processed initially but loop prevention
+#   # stops reply chains between bots.
+#   # NOTE: Do NOT include yourself (bot_username) — that's handled automatically.
+#   known_bot_usernames: []
+#     # - "project_123_bot"
+#     # - "another-automation"
+#
+#   # Usernames whose MR comments are completely ignored.
+#   # Use for CI/pipeline bots whose comments are status updates, not code
+#   # review feedback. Differs from known_bot_usernames: ignored users'
+#   # comments are completely skipped (never processed), while known bots'
+#   # comments are processed initially but loop prevention stops chains.
+#   ignored_usernames: []
+#     # - "gitlab-ci-pipeline"
 
 # AI Provider Selection (choose one: "claude" or "gemini")
 ai_provider: claude

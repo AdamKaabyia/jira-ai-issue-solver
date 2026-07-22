@@ -110,6 +110,11 @@ type Profile struct {
 // repositories that constitute a working environment for AI sessions.
 // Single-repo projects are just workspaces with one entry.
 type WorkspaceConfig struct {
+	// Hosting selects the code hosting provider for this workspace.
+	// Valid values: "github" (default), "gitlab". All repos in the
+	// workspace must reside on the same hosting provider.
+	Hosting string `yaml:"hosting" mapstructure:"hosting"`
+
 	// Container holds workspace-level container settings. Required for
 	// multi-repo workspaces (the "fat container" with all toolchains).
 	// For single-repo workspaces, this may be empty — the repo's
@@ -562,6 +567,22 @@ type Config struct {
 		SkipPRLabel       string   `yaml:"skip_pr_label" mapstructure:"skip_pr_label" default:"ai-bot-skip"` // GitHub label that tells the bot to skip a PR
 	} `yaml:"github" mapstructure:"github"`
 
+	// GitLab configuration (optional — required only when workspaces
+	// use hosting: gitlab). Uses Personal Access Token or Project
+	// Access Token for authentication.
+	GitLab struct {
+		BaseURL      string `yaml:"base_url" mapstructure:"base_url"`           // e.g., "https://gitlab.com" or "https://gitlab.cee.redhat.com"
+		AccessToken  string `yaml:"access_token" mapstructure:"access_token"`   // PAT or project/group access token
+		BotUsername  string `yaml:"bot_username" mapstructure:"bot_username"`    // Git commit author name
+		BotEmail     string `yaml:"bot_email" mapstructure:"bot_email"`          // Git commit author email
+		MRLabel      string `yaml:"mr_label" mapstructure:"mr_label"`           // Default label applied to merge requests
+		SSHKeyPath   string `yaml:"ssh_key_path" mapstructure:"ssh_key_path"`   // Optional: SSH key for commit signing
+		SkipMRLabel  string `yaml:"skip_mr_label" mapstructure:"skip_mr_label"` // GitLab label that tells the bot to skip an MR
+		MaxThreadDepth    int      `yaml:"max_thread_depth" mapstructure:"max_thread_depth"`
+		KnownBotUsernames []string `yaml:"known_bot_usernames" mapstructure:"known_bot_usernames"`
+		IgnoredUsernames  []string `yaml:"ignored_usernames" mapstructure:"ignored_usernames"`
+	} `yaml:"gitlab" mapstructure:"gitlab"`
+
 	// AI Provider selection
 	AIProvider string `yaml:"ai_provider" mapstructure:"ai_provider" default:"claude"` // "claude" or "gemini"
 
@@ -830,6 +851,45 @@ func (c *Config) GetBotEmail() string {
 	return ""
 }
 
+// HostingProvider constants.
+const (
+	HostingGitHub  = "github"
+	HostingGitLab  = "gitlab"
+)
+
+// HostingProvider returns the normalized hosting provider for the workspace.
+// Defaults to "github" when the field is empty.
+func (w *WorkspaceConfig) HostingProvider() string {
+	switch strings.ToLower(w.Hosting) {
+	case HostingGitLab:
+		return HostingGitLab
+	default:
+		return HostingGitHub
+	}
+}
+
+// RequiredHostingProviders scans all project workspaces and returns which
+// hosting providers are in use. GitHub is always needed if any workspace
+// uses it (or has no explicit hosting field, since github is the default).
+func (c *Config) RequiredHostingProviders() (needsGitHub, needsGitLab bool) {
+	for _, project := range c.Jira.Projects {
+		for _, ws := range project.Workspaces {
+			switch ws.HostingProvider() {
+			case HostingGitLab:
+				needsGitLab = true
+			default:
+				needsGitHub = true
+			}
+		}
+	}
+	// If no workspaces are configured at all, default to needing GitHub
+	// (backward compatibility).
+	if !needsGitHub && !needsGitLab {
+		needsGitHub = true
+	}
+	return
+}
+
 // LoadConfig loads configuration from multiple sources with Viper
 // Priority order: Environment variables > Config file > .env file > Defaults
 func LoadConfig(configPath string) (*Config, error) {
@@ -882,6 +942,18 @@ func LoadConfig(configPath string) (*Config, error) {
 	bindEnv("github.ignored_usernames")
 	bindEnv("github.ignored_check_names")
 	bindEnv("github.skip_pr_label")
+
+	// GitLab configuration
+	bindEnv("gitlab.base_url")
+	bindEnv("gitlab.access_token")
+	bindEnv("gitlab.bot_username")
+	bindEnv("gitlab.bot_email")
+	bindEnv("gitlab.mr_label")
+	bindEnv("gitlab.ssh_key_path")
+	bindEnv("gitlab.skip_mr_label")
+	bindEnv("gitlab.max_thread_depth")
+	bindEnv("gitlab.known_bot_usernames")
+	bindEnv("gitlab.ignored_usernames")
 
 	// AI configuration
 	bindEnv("ai_provider")
@@ -1137,6 +1209,11 @@ func setDefaults(v *viper.Viper) {
 		"codeclimate",
 	})
 
+	// GitLab defaults
+	v.SetDefault("gitlab.mr_label", "ai-mr")
+	v.SetDefault("gitlab.skip_mr_label", "ai-bot-skip")
+	v.SetDefault("gitlab.max_thread_depth", 5)
+
 	// AI Provider defaults
 	v.SetDefault("ai_provider", "claude")
 
@@ -1211,40 +1288,58 @@ func (c *Config) validate() error {
 		}
 	}
 
-	// GitHub validation - App credentials required
-	if c.GitHub.AppID <= 0 {
-		return errors.New("github.app_id must be a positive integer")
-	}
-	if c.GitHub.PrivateKeyPath == "" {
-		return errors.New("github.private_key_path must be provided")
-	}
-	if _, err := os.Stat(c.GitHub.PrivateKeyPath); os.IsNotExist(err) {
-		return fmt.Errorf("github.private_key_path file does not exist: %s", c.GitHub.PrivateKeyPath)
-	}
+	// Determine which hosting providers are in use.
+	needsGitHub, needsGitLab := c.RequiredHostingProviders()
 
-	if c.GitHub.BotUsername == "" {
-		return errors.New("github.bot_username is required")
-	}
+	// GitHub validation — required when any workspace uses github hosting.
+	if needsGitHub {
+		if c.GitHub.AppID <= 0 {
+			return errors.New("github.app_id must be a positive integer")
+		}
+		if c.GitHub.PrivateKeyPath == "" {
+			return errors.New("github.private_key_path must be provided")
+		}
+		if _, err := os.Stat(c.GitHub.PrivateKeyPath); os.IsNotExist(err) {
+			return fmt.Errorf("github.private_key_path file does not exist: %s", c.GitHub.PrivateKeyPath)
+		}
 
-	// Validate bot email can be determined
-	if c.GetBotEmail() == "" {
-		return errors.New("github.bot_email is required (either set explicitly, or it will be auto-constructed from app_id)")
-	}
+		if c.GitHub.BotUsername == "" {
+			return errors.New("github.bot_username is required")
+		}
 
-	// Validate bot username doesn't contain characters that could cause issues
-	invalidChars := []string{"/", "\\", ":", "*", "?", "\"", "<", ">", "|", "\n", "\r", "\t"}
-	for _, char := range invalidChars {
-		if strings.Contains(c.GitHub.BotUsername, char) {
-			return fmt.Errorf("github.bot_username contains invalid character %q - bot username will be used in branch names and must be git-safe", char)
+		if c.GetBotEmail() == "" {
+			return errors.New("github.bot_email is required (either set explicitly, or it will be auto-constructed from app_id)")
+		}
+
+		invalidChars := []string{"/", "\\", ":", "*", "?", "\"", "<", ">", "|", "\n", "\r", "\t"}
+		for _, char := range invalidChars {
+			if strings.Contains(c.GitHub.BotUsername, char) {
+				return fmt.Errorf("github.bot_username contains invalid character %q - bot username will be used in branch names and must be git-safe", char)
+			}
+		}
+
+		for _, botUsername := range c.GitHub.KnownBotUsernames {
+			for _, char := range invalidChars {
+				if strings.Contains(botUsername, char) {
+					return fmt.Errorf("github.known_bot_usernames contains username %q with invalid character %q", botUsername, char)
+				}
+			}
 		}
 	}
 
-	// Validate known bot usernames don't contain problematic characters
-	for _, botUsername := range c.GitHub.KnownBotUsernames {
-		for _, char := range invalidChars {
-			if strings.Contains(botUsername, char) {
-				return fmt.Errorf("github.known_bot_usernames contains username %q with invalid character %q", botUsername, char)
-			}
+	// GitLab validation — required when any workspace uses gitlab hosting.
+	if needsGitLab {
+		if c.GitLab.BaseURL == "" {
+			return errors.New("gitlab.base_url is required when any workspace uses hosting: gitlab")
+		}
+		if c.GitLab.AccessToken == "" {
+			return errors.New("gitlab.access_token is required when any workspace uses hosting: gitlab")
+		}
+		if c.GitLab.BotUsername == "" {
+			return errors.New("gitlab.bot_username is required when any workspace uses hosting: gitlab")
+		}
+		if c.GitLab.BotEmail == "" {
+			return errors.New("gitlab.bot_email is required when any workspace uses hosting: gitlab")
 		}
 	}
 
@@ -1305,6 +1400,9 @@ func (p *ProjectConfig) validate(index int) error {
 
 	// Validate each workspace.
 	for wsName, ws := range p.Workspaces {
+		if h := strings.ToLower(ws.Hosting); h != "" && h != HostingGitHub && h != HostingGitLab {
+			return fmt.Errorf("%s.workspaces.%s.hosting: invalid value %q (must be %q or %q)", prefix, wsName, ws.Hosting, HostingGitHub, HostingGitLab)
+		}
 		if len(ws.Repos) == 0 {
 			return fmt.Errorf("%s.workspaces.%s: at least one repo is required", prefix, wsName)
 		}
