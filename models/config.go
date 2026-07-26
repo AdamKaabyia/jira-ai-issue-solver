@@ -590,10 +590,12 @@ type Config struct {
 	// CLI path, timeout, and tool settings are configured per-repo via
 	// .ai-bot/config.yaml or container environment.
 	//
-	// Two authentication modes are supported (mutually exclusive):
+	// Three authentication modes are supported (mutually exclusive):
 	//   1. Direct API key: set api_key (JIRA_AI_CLAUDE_API_KEY)
 	//   2. Vertex AI: set vertex_project_id, vertex_region, and
 	//      vertex_credentials_file (JIRA_AI_CLAUDE_VERTEX_*)
+	//   3. API Proxy: set proxy_url and proxy_auth_token
+	//      (JIRA_AI_CLAUDE_PROXY_URL, JIRA_AI_CLAUDE_PROXY_AUTH_TOKEN)
 	Claude struct {
 		APIKey string `yaml:"api_key" mapstructure:"api_key"`
 
@@ -609,6 +611,22 @@ type Config struct {
 		VertexProjectID       string `yaml:"vertex_project_id" mapstructure:"vertex_project_id"`
 		VertexRegion          string `yaml:"vertex_region" mapstructure:"vertex_region"`
 		VertexCredentialsFile string `yaml:"vertex_credentials_file" mapstructure:"vertex_credentials_file"`
+
+		// API Proxy authentication fields. When set, Claude Code
+		// routes requests through a custom LLM gateway or proxy.
+		// Mutually exclusive with api_key and vertex_credentials_file.
+		//
+		// When proxy_vertex_format is false (default), the container
+		// gets ANTHROPIC_BASE_URL + ANTHROPIC_AUTH_TOKEN (Anthropic
+		// Messages API format).
+		//
+		// When proxy_vertex_format is true, the container gets
+		// Vertex-format proxy env vars (ANTHROPIC_VERTEX_BASE_URL,
+		// CLAUDE_CODE_SKIP_VERTEX_AUTH, etc.) and vertex_project_id
+		// + vertex_region must also be set.
+		ProxyURL          string `yaml:"proxy_url" mapstructure:"proxy_url"`
+		ProxyAuthToken    string `yaml:"proxy_auth_token" mapstructure:"proxy_auth_token"`
+		ProxyVertexFormat bool   `yaml:"proxy_vertex_format" mapstructure:"proxy_vertex_format"`
 	} `yaml:"claude" mapstructure:"claude"`
 
 	// Gemini configuration.
@@ -964,6 +982,9 @@ func LoadConfig(configPath string) (*Config, error) {
 	bindEnv("claude.vertex_project_id")
 	bindEnv("claude.vertex_region")
 	bindEnv("claude.vertex_credentials_file")
+	bindEnv("claude.proxy_url")
+	bindEnv("claude.proxy_auth_token")
+	bindEnv("claude.proxy_vertex_format")
 	bindEnv("gemini.api_key")
 	bindEnv("gemini.model")
 	bindEnv("gemini.input_price_per_mtok")
@@ -1554,8 +1575,8 @@ func (cc *ContainerCfg) validate() error {
 }
 
 // validateClaudeAuth checks that Claude authentication is configured
-// correctly: either a direct API key or all three Vertex AI fields,
-// but not both.
+// correctly: exactly one of direct API key, Vertex AI credentials,
+// or API proxy — never more than one.
 func (c *Config) validateClaudeAuth() error {
 	hasAPIKey := c.Claude.APIKey != ""
 	hasVertexProject := c.Claude.VertexProjectID != ""
@@ -1564,11 +1585,54 @@ func (c *Config) validateClaudeAuth() error {
 	hasAnyVertex := hasVertexProject || hasVertexRegion || hasVertexCreds
 	hasAllVertex := hasVertexProject && hasVertexRegion && hasVertexCreds
 
-	if hasAPIKey && hasAnyVertex {
-		return errors.New("claude: api_key and vertex_* fields are mutually exclusive — configure one authentication mode, not both")
+	hasProxyURL := c.Claude.ProxyURL != ""
+	hasProxyToken := c.Claude.ProxyAuthToken != ""
+	hasAnyProxy := hasProxyURL || hasProxyToken
+	hasAllProxy := hasProxyURL && hasProxyToken
+
+	// Proxy fields must be set together.
+	if hasAnyProxy && !hasAllProxy {
+		if !hasProxyURL {
+			return errors.New("claude: proxy_auth_token is set but proxy_url is missing")
+		}
+		return errors.New("claude: proxy_url is set but proxy_auth_token is missing")
 	}
 
-	if hasAnyVertex && !hasAllVertex {
+	// Count active modes for mutual-exclusivity check.
+	modes := 0
+	if hasAPIKey {
+		modes++
+	}
+	if hasVertexCreds {
+		modes++
+	}
+	if hasAllProxy {
+		modes++
+	}
+	if modes > 1 {
+		return errors.New("claude: api_key, vertex_credentials_file, and proxy_url are mutually exclusive — configure exactly one authentication mode")
+	}
+
+	// Vertex (non-proxy) requires all three fields together.
+	if hasVertexCreds {
+		if hasAnyVertex && !hasAllVertex {
+			var missing []string
+			if !hasVertexProject {
+				missing = append(missing, "vertex_project_id")
+			}
+			if !hasVertexRegion {
+				missing = append(missing, "vertex_region")
+			}
+			if !hasVertexCreds {
+				missing = append(missing, "vertex_credentials_file")
+			}
+			return fmt.Errorf("claude: incomplete Vertex AI configuration — missing: %s", strings.Join(missing, ", "))
+		}
+	}
+
+	// Vertex fields without vertex_credentials_file are only valid
+	// alongside proxy_vertex_format.
+	if !hasVertexCreds && !hasAllProxy && hasAnyVertex {
 		var missing []string
 		if !hasVertexProject {
 			missing = append(missing, "vertex_project_id")
@@ -1576,14 +1640,27 @@ func (c *Config) validateClaudeAuth() error {
 		if !hasVertexRegion {
 			missing = append(missing, "vertex_region")
 		}
-		if !hasVertexCreds {
-			missing = append(missing, "vertex_credentials_file")
-		}
+		missing = append(missing, "vertex_credentials_file")
 		return fmt.Errorf("claude: incomplete Vertex AI configuration — missing: %s", strings.Join(missing, ", "))
 	}
 
-	if c.AIProvider == "claude" && !hasAPIKey && !hasAllVertex {
-		return errors.New("claude: ai_provider is \"claude\" but no authentication configured — set api_key or all vertex_* fields")
+	// Proxy with vertex format requires vertex_project_id and vertex_region.
+	if hasAllProxy && c.Claude.ProxyVertexFormat {
+		if !hasVertexProject || !hasVertexRegion {
+			var missing []string
+			if !hasVertexProject {
+				missing = append(missing, "vertex_project_id")
+			}
+			if !hasVertexRegion {
+				missing = append(missing, "vertex_region")
+			}
+			return fmt.Errorf("claude: proxy_vertex_format requires %s", strings.Join(missing, " and "))
+		}
+	}
+
+	// When ai_provider is claude, at least one auth mode must be set.
+	if c.AIProvider == "claude" && !hasAPIKey && !hasAllVertex && !hasAllProxy {
+		return errors.New("claude: ai_provider is \"claude\" but no authentication configured — set api_key, all vertex_* fields, or proxy_url + proxy_auth_token")
 	}
 
 	return nil

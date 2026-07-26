@@ -144,11 +144,22 @@ func main() {
 	}
 
 	var claudeVertex *executor.ClaudeVertexConfig
-	if config.Claude.VertexProjectID != "" {
+	if config.Claude.VertexProjectID != "" && config.Claude.VertexCredentialsFile != "" {
 		claudeVertex = &executor.ClaudeVertexConfig{
 			ProjectID:       config.Claude.VertexProjectID,
 			Region:          config.Claude.VertexRegion,
 			CredentialsFile: config.Claude.VertexCredentialsFile,
+		}
+	}
+
+	var claudeProxy *executor.ClaudeProxyConfig
+	if config.Claude.ProxyURL != "" {
+		claudeProxy = &executor.ClaudeProxyConfig{
+			BaseURL:         config.Claude.ProxyURL,
+			AuthToken:       config.Claude.ProxyAuthToken,
+			VertexFormat:    config.Claude.ProxyVertexFormat,
+			VertexProjectID: config.Claude.VertexProjectID,
+			VertexRegion:    config.Claude.VertexRegion,
 		}
 	}
 
@@ -158,6 +169,7 @@ func main() {
 			DefaultProvider:    config.AIProvider,
 			AIAPIKeys:          aiAPIKeys,
 			ClaudeVertex:       claudeVertex,
+			ClaudeProxy:        claudeProxy,
 			SessionTimeout:     time.Duration(config.Guardrails.MaxContainerRuntimeMinutes) * time.Minute,
 			IgnoredUsernames:   config.GitHub.IgnoredUsernames,
 			KnownBotUsernames:  config.GitHub.KnownBotUsernames,

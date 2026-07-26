@@ -255,6 +255,13 @@ type Config struct {
 	// instead of setting ANTHROPIC_API_KEY.
 	ClaudeVertex *ClaudeVertexConfig
 
+	// ClaudeProxy holds API proxy/gateway settings for Claude.
+	// When configured, the pipeline injects proxy-specific env
+	// vars (ANTHROPIC_BASE_URL or ANTHROPIC_VERTEX_BASE_URL)
+	// instead of ANTHROPIC_API_KEY or GCP credentials. Takes
+	// precedence over both ClaudeVertex and AIAPIKeys["claude"].
+	ClaudeProxy *ClaudeProxyConfig
+
 	// SessionTimeout is the maximum duration for an AI session
 	// inside the container. Zero means no explicit timeout (only
 	// the parent context controls cancellation).
@@ -328,4 +335,33 @@ type ClaudeVertexConfig struct {
 	// JSON key file. Mounted read-only into the container at
 	// /run/secrets/gcp-sa-key.json.
 	CredentialsFile string
+}
+
+// ClaudeProxyConfig holds API proxy/gateway settings for Claude Code.
+// These are injected into the container as environment variables so
+// that Claude Code CLI routes requests through a custom endpoint.
+type ClaudeProxyConfig struct {
+	// BaseURL is the proxy endpoint URL. When VertexFormat is false
+	// this maps to ANTHROPIC_BASE_URL; when true it maps to
+	// ANTHROPIC_VERTEX_BASE_URL.
+	BaseURL string
+
+	// AuthToken is the Bearer token for the proxy
+	// (env: ANTHROPIC_AUTH_TOKEN).
+	AuthToken string
+
+	// VertexFormat selects the proxy protocol. When false (default),
+	// the container uses the Anthropic Messages API proxy pattern
+	// (ANTHROPIC_BASE_URL). When true, it uses the Vertex rawPredict
+	// proxy pattern (ANTHROPIC_VERTEX_BASE_URL + CLAUDE_CODE_USE_VERTEX
+	// + CLAUDE_CODE_SKIP_VERTEX_AUTH).
+	VertexFormat bool
+
+	// VertexProjectID is required when VertexFormat is true
+	// (env: ANTHROPIC_VERTEX_PROJECT_ID).
+	VertexProjectID string
+
+	// VertexRegion is required when VertexFormat is true
+	// (env: CLOUD_ML_REGION).
+	VertexRegion string
 }

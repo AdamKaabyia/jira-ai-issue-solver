@@ -637,7 +637,18 @@ func (p *Pipeline) buildContainerEnv(provider string) map[string]string {
 
 	switch provider {
 	case "claude":
-		if p.cfg.ClaudeVertex != nil {
+		if p.cfg.ClaudeProxy != nil {
+			env["ANTHROPIC_AUTH_TOKEN"] = p.cfg.ClaudeProxy.AuthToken
+			if p.cfg.ClaudeProxy.VertexFormat {
+				env["CLAUDE_CODE_USE_VERTEX"] = "1"
+				env["ANTHROPIC_VERTEX_BASE_URL"] = p.cfg.ClaudeProxy.BaseURL
+				env["CLAUDE_CODE_SKIP_VERTEX_AUTH"] = "1"
+				env["CLOUD_ML_REGION"] = p.cfg.ClaudeProxy.VertexRegion
+				env["ANTHROPIC_VERTEX_PROJECT_ID"] = p.cfg.ClaudeProxy.VertexProjectID
+			} else {
+				env["ANTHROPIC_BASE_URL"] = p.cfg.ClaudeProxy.BaseURL
+			}
+		} else if p.cfg.ClaudeVertex != nil {
 			env["CLAUDE_CODE_USE_VERTEX"] = "1"
 			env["ANTHROPIC_VERTEX_PROJECT_ID"] = p.cfg.ClaudeVertex.ProjectID
 			env["CLOUD_ML_REGION"] = p.cfg.ClaudeVertex.Region

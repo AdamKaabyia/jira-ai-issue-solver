@@ -1333,13 +1333,110 @@ func TestConfig_validateClaudeAuth(t *testing.T) {
 	t.Run("api_key and vertex are mutually exclusive", func(t *testing.T) {
 		config := validBaseConfig(t)
 		config.Claude.APIKey = "sk-ant-test-key"
-		config.Claude.VertexProjectID = "my-project"
+		config.Claude.VertexCredentialsFile = "/path/to/creds.json"
 		err := config.validate()
 		if err == nil {
 			t.Fatal("expected error for mutually exclusive config")
 		}
 		if !strings.Contains(err.Error(), "mutually exclusive") {
 			t.Errorf("error = %q, want 'mutually exclusive'", err.Error())
+		}
+	})
+
+	t.Run("proxy complete config is valid", func(t *testing.T) {
+		config := validBaseConfig(t)
+		config.Claude.ProxyURL = "https://proxy.example.com"
+		config.Claude.ProxyAuthToken = "bearer-token"
+		if err := config.validate(); err != nil {
+			t.Errorf("expected no error, got: %v", err)
+		}
+	})
+
+	t.Run("proxy with vertex format is valid", func(t *testing.T) {
+		config := validBaseConfig(t)
+		config.Claude.ProxyURL = "https://proxy.example.com"
+		config.Claude.ProxyAuthToken = "bearer-token"
+		config.Claude.ProxyVertexFormat = true
+		config.Claude.VertexProjectID = "my-project"
+		config.Claude.VertexRegion = "us-east5"
+		if err := config.validate(); err != nil {
+			t.Errorf("expected no error, got: %v", err)
+		}
+	})
+
+	t.Run("proxy and api_key are mutually exclusive", func(t *testing.T) {
+		config := validBaseConfig(t)
+		config.Claude.APIKey = "sk-ant-test-key"
+		config.Claude.ProxyURL = "https://proxy.example.com"
+		config.Claude.ProxyAuthToken = "bearer-token"
+		err := config.validate()
+		if err == nil {
+			t.Fatal("expected error for mutually exclusive config")
+		}
+		if !strings.Contains(err.Error(), "mutually exclusive") {
+			t.Errorf("error = %q, want 'mutually exclusive'", err.Error())
+		}
+	})
+
+	t.Run("proxy and vertex_credentials_file are mutually exclusive", func(t *testing.T) {
+		config := validBaseConfig(t)
+		config.Claude.ProxyURL = "https://proxy.example.com"
+		config.Claude.ProxyAuthToken = "bearer-token"
+		config.Claude.VertexCredentialsFile = "/path/to/creds.json"
+		err := config.validate()
+		if err == nil {
+			t.Fatal("expected error for mutually exclusive config")
+		}
+		if !strings.Contains(err.Error(), "mutually exclusive") {
+			t.Errorf("error = %q, want 'mutually exclusive'", err.Error())
+		}
+	})
+
+	t.Run("proxy_url without proxy_auth_token is invalid", func(t *testing.T) {
+		config := validBaseConfig(t)
+		config.Claude.ProxyURL = "https://proxy.example.com"
+		err := config.validate()
+		if err == nil {
+			t.Fatal("expected error for incomplete proxy config")
+		}
+		if !strings.Contains(err.Error(), "proxy_auth_token is missing") {
+			t.Errorf("error = %q, should mention proxy_auth_token", err.Error())
+		}
+	})
+
+	t.Run("proxy_auth_token without proxy_url is invalid", func(t *testing.T) {
+		config := validBaseConfig(t)
+		config.Claude.ProxyAuthToken = "bearer-token"
+		err := config.validate()
+		if err == nil {
+			t.Fatal("expected error for incomplete proxy config")
+		}
+		if !strings.Contains(err.Error(), "proxy_url is missing") {
+			t.Errorf("error = %q, should mention proxy_url", err.Error())
+		}
+	})
+
+	t.Run("proxy vertex format requires vertex_project_id and vertex_region", func(t *testing.T) {
+		config := validBaseConfig(t)
+		config.Claude.ProxyURL = "https://proxy.example.com"
+		config.Claude.ProxyAuthToken = "bearer-token"
+		config.Claude.ProxyVertexFormat = true
+		err := config.validate()
+		if err == nil {
+			t.Fatal("expected error when proxy_vertex_format is true but vertex fields missing")
+		}
+		if !strings.Contains(err.Error(), "proxy_vertex_format requires") {
+			t.Errorf("error = %q, want mention of proxy_vertex_format requires", err.Error())
+		}
+	})
+
+	t.Run("non-claude provider with proxy is valid", func(t *testing.T) {
+		config := validBaseConfig(t)
+		config.AIProvider = "gemini"
+		config.Claude.ProxyURL = "https://proxy.example.com"
+		config.Claude.ProxyAuthToken = "bearer-token"
+		if err := config.validate(); err != nil {
+			t.Errorf("expected no error, got: %v", err)
 		}
 	})
 

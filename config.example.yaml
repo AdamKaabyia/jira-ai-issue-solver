@@ -416,7 +416,7 @@ github:
 ai_provider: claude
 
 # Claude authentication — passed to the container as environment variables.
-# Two modes are supported (mutually exclusive):
+# Three modes are supported (mutually exclusive):
 #
 # Mode 1: Direct Anthropic API key
 #   Get from https://console.anthropic.com/settings/keys
@@ -426,6 +426,13 @@ ai_provider: claude
 #   fields must be set together. The credentials file is mounted
 #   read-only into the container.
 #
+# Mode 3: API Proxy / LLM Gateway
+#   Routes requests through a custom proxy (e.g., Red Hat Models.corp,
+#   AWS API Gateway, Cloudflare AI Gateway). Set proxy_url and
+#   proxy_auth_token. When the proxy uses Vertex rawPredict format,
+#   also set proxy_vertex_format: true plus vertex_project_id and
+#   vertex_region.
+#
 # CLI-level settings (timeout, tool filtering, etc.) are configured per-repo
 # via .ai-bot/config.yaml or container environment, not here.
 claude:
@@ -433,9 +440,24 @@ claude:
   # api_key: "sk-ant-api03-..."
 
   # Mode 2: Vertex AI
-  vertex_project_id: "your-gcp-project-id"
-  vertex_region: "us-east5"
-  vertex_credentials_file: "/path/to/gcp-sa-key.json"  # Host path — mounted into AI containers by the bot
+  # vertex_project_id: "your-gcp-project-id"
+  # vertex_region: "us-east5"
+  # vertex_credentials_file: "/path/to/gcp-sa-key.json"  # Host path — mounted into AI containers by the bot
+
+  # Mode 3: API Proxy (Anthropic Messages format)
+  # Container receives ANTHROPIC_BASE_URL + ANTHROPIC_AUTH_TOKEN.
+  # proxy_url: "https://your-gateway.example.com"
+  # proxy_auth_token: "your-bearer-token"
+
+  # Mode 3 variant: API Proxy (Vertex rawPredict format)
+  # For proxies that use Vertex AI protocol (e.g., Red Hat Models.corp).
+  # Container receives ANTHROPIC_VERTEX_BASE_URL + CLAUDE_CODE_SKIP_VERTEX_AUTH
+  # + ANTHROPIC_AUTH_TOKEN + CLOUD_ML_REGION + ANTHROPIC_VERTEX_PROJECT_ID.
+  # proxy_url: "https://claude--apicast-production.apps.int.example.com:443"
+  # proxy_auth_token: "your-bearer-token"
+  # proxy_vertex_format: true
+  # vertex_project_id: "your-gcp-project-id"
+  # vertex_region: "us-east5"
 
   # Optional: Claude model override (e.g., "claude-sonnet-4-6").
   # Repo-level .ai-bot/config.yaml can further override this.

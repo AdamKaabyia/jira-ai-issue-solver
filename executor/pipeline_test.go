@@ -1254,6 +1254,158 @@ func TestExecuteNewTicket_VertexAI_NotUsedForGemini(t *testing.T) {
 	}
 }
 
+// --- Proxy authentication ---
+
+func TestExecuteNewTicket_Proxy_SetsAnthropicBaseURL(t *testing.T) {
+	d := newTestDeps(t)
+
+	var envVars map[string]string
+	d.containers.StartFunc = func(ctx context.Context, cfg *container.Config, wsDir, ticketKey string, env map[string]string) (*container.Container, error) {
+		envVars = env
+		return &container.Container{ID: "c1", Name: "test"}, nil
+	}
+
+	p := d.pipelineWithConfig(t, executor.Config{
+		BotUsername:     "ai-bot",
+		DefaultProvider: "claude",
+		ClaudeProxy: &executor.ClaudeProxyConfig{
+			BaseURL:   "https://proxy.example.com",
+			AuthToken: "bearer-token-123",
+		},
+	})
+	_, err := p.Execute(context.Background(), newTicketJob("PROJ-1"))
+
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if envVars["ANTHROPIC_BASE_URL"] != "https://proxy.example.com" {
+		t.Errorf("ANTHROPIC_BASE_URL = %q, want https://proxy.example.com", envVars["ANTHROPIC_BASE_URL"])
+	}
+	if envVars["ANTHROPIC_AUTH_TOKEN"] != "bearer-token-123" {
+		t.Errorf("ANTHROPIC_AUTH_TOKEN = %q, want bearer-token-123", envVars["ANTHROPIC_AUTH_TOKEN"])
+	}
+	if _, ok := envVars["ANTHROPIC_API_KEY"]; ok {
+		t.Error("ANTHROPIC_API_KEY should not be set when using proxy")
+	}
+	if _, ok := envVars["CLAUDE_CODE_USE_VERTEX"]; ok {
+		t.Error("CLAUDE_CODE_USE_VERTEX should not be set for non-vertex proxy")
+	}
+}
+
+func TestExecuteNewTicket_Proxy_VertexFormat_SetsVertexProxyEnv(t *testing.T) {
+	d := newTestDeps(t)
+
+	var envVars map[string]string
+	d.containers.StartFunc = func(ctx context.Context, cfg *container.Config, wsDir, ticketKey string, env map[string]string) (*container.Container, error) {
+		envVars = env
+		return &container.Container{ID: "c1", Name: "test"}, nil
+	}
+
+	p := d.pipelineWithConfig(t, executor.Config{
+		BotUsername:     "ai-bot",
+		DefaultProvider: "claude",
+		ClaudeProxy: &executor.ClaudeProxyConfig{
+			BaseURL:         "https://proxy.example.com/vertex",
+			AuthToken:       "bearer-token-456",
+			VertexFormat:    true,
+			VertexProjectID: "proxy-project",
+			VertexRegion:    "us-east5",
+		},
+	})
+	_, err := p.Execute(context.Background(), newTicketJob("PROJ-1"))
+
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if envVars["CLAUDE_CODE_USE_VERTEX"] != "1" {
+		t.Errorf("CLAUDE_CODE_USE_VERTEX = %q, want 1", envVars["CLAUDE_CODE_USE_VERTEX"])
+	}
+	if envVars["ANTHROPIC_VERTEX_BASE_URL"] != "https://proxy.example.com/vertex" {
+		t.Errorf("ANTHROPIC_VERTEX_BASE_URL = %q, want https://proxy.example.com/vertex", envVars["ANTHROPIC_VERTEX_BASE_URL"])
+	}
+	if envVars["CLAUDE_CODE_SKIP_VERTEX_AUTH"] != "1" {
+		t.Errorf("CLAUDE_CODE_SKIP_VERTEX_AUTH = %q, want 1", envVars["CLAUDE_CODE_SKIP_VERTEX_AUTH"])
+	}
+	if envVars["ANTHROPIC_AUTH_TOKEN"] != "bearer-token-456" {
+		t.Errorf("ANTHROPIC_AUTH_TOKEN = %q, want bearer-token-456", envVars["ANTHROPIC_AUTH_TOKEN"])
+	}
+	if envVars["CLOUD_ML_REGION"] != "us-east5" {
+		t.Errorf("CLOUD_ML_REGION = %q, want us-east5", envVars["CLOUD_ML_REGION"])
+	}
+	if envVars["ANTHROPIC_VERTEX_PROJECT_ID"] != "proxy-project" {
+		t.Errorf("ANTHROPIC_VERTEX_PROJECT_ID = %q, want proxy-project", envVars["ANTHROPIC_VERTEX_PROJECT_ID"])
+	}
+	if _, ok := envVars["ANTHROPIC_API_KEY"]; ok {
+		t.Error("ANTHROPIC_API_KEY should not be set when using vertex proxy")
+	}
+	if _, ok := envVars["ANTHROPIC_BASE_URL"]; ok {
+		t.Error("ANTHROPIC_BASE_URL should not be set for vertex-format proxy")
+	}
+}
+
+func TestExecuteNewTicket_Proxy_OverridesAPIKey(t *testing.T) {
+	d := newTestDeps(t)
+
+	var envVars map[string]string
+	d.containers.StartFunc = func(ctx context.Context, cfg *container.Config, wsDir, ticketKey string, env map[string]string) (*container.Container, error) {
+		envVars = env
+		return &container.Container{ID: "c1", Name: "test"}, nil
+	}
+
+	p := d.pipelineWithConfig(t, executor.Config{
+		BotUsername:     "ai-bot",
+		DefaultProvider: "claude",
+		AIAPIKeys:       map[string]string{"claude": "sk-ant-should-not-be-used"},
+		ClaudeProxy: &executor.ClaudeProxyConfig{
+			BaseURL:   "https://proxy.example.com",
+			AuthToken: "bearer-token-789",
+		},
+	})
+	_, err := p.Execute(context.Background(), newTicketJob("PROJ-1"))
+
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if _, ok := envVars["ANTHROPIC_API_KEY"]; ok {
+		t.Error("ANTHROPIC_API_KEY should not be set when proxy is configured")
+	}
+	if envVars["ANTHROPIC_BASE_URL"] != "https://proxy.example.com" {
+		t.Errorf("ANTHROPIC_BASE_URL = %q, want https://proxy.example.com", envVars["ANTHROPIC_BASE_URL"])
+	}
+}
+
+func TestExecuteNewTicket_Proxy_NoCredentialMount(t *testing.T) {
+	d := newTestDeps(t)
+
+	var receivedCfg *container.Config
+	d.containers.StartFunc = func(ctx context.Context, cfg *container.Config, wsDir, ticketKey string, env map[string]string) (*container.Container, error) {
+		receivedCfg = cfg
+		return &container.Container{ID: "c1", Name: "test"}, nil
+	}
+
+	p := d.pipelineWithConfig(t, executor.Config{
+		BotUsername:     "ai-bot",
+		DefaultProvider: "claude",
+		ClaudeProxy: &executor.ClaudeProxyConfig{
+			BaseURL:         "https://proxy.example.com/vertex",
+			AuthToken:       "bearer-token",
+			VertexFormat:    true,
+			VertexProjectID: "proxy-project",
+			VertexRegion:    "us-east5",
+		},
+	})
+	_, err := p.Execute(context.Background(), newTicketJob("PROJ-1"))
+
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	for _, m := range receivedCfg.ExtraMounts {
+		if m.Target == executor.ContainerCredsMountTarget {
+			t.Error("credentials file should not be mounted for proxy mode")
+		}
+	}
+}
+
 // --- ErrNoChanges handling ---
 
 func TestExecuteNewTicket_ErrNoChanges_ReturnsError(t *testing.T) {

@@ -1,0 +1,20 @@
+# Secrets and credentials
+config.yaml
+.env
+.env.*
+*.pem
+*.key
+keys/
+
+# Build artifacts and binaries
+jira-ai-issue-solver
+bin/
+dist/
+build/
+
+# Vendor / dependency cache
+vendor/
+
+# OS files
+.DS_Store
+Thumbs.db
