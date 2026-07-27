@@ -420,6 +420,11 @@ func main() {
 	// Drain running jobs.
 	coordinator.Shutdown()
 
+	// Stop the URL translation proxy (if active).
+	if err := pipeline.Close(); err != nil {
+		logger.Error("Pipeline close error", zap.Error(err))
+	}
+
 	// Shut down HTTP server.
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer shutdownCancel()

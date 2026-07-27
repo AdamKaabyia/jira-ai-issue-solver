@@ -80,6 +80,9 @@ func (r *CLIRunner) Run(ctx context.Context, opts RunOptions) (string, error) {
 	for _, t := range opts.Tmpfs {
 		args = append(args, "--tmpfs", t)
 	}
+	for _, h := range opts.AddHosts {
+		args = append(args, "--add-host", h)
+	}
 
 	args = append(args, opts.Image)
 	args = append(args, opts.Command...)

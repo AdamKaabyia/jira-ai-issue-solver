@@ -1049,7 +1049,7 @@ func LoadConfig(configPath string) (*Config, error) {
 	v.SetConfigName(".env")
 	v.SetConfigType("env")
 	v.AddConfigPath(".")
-	if err := v.ReadInConfig(); err != nil {
+	if err := v.MergeInConfig(); err != nil {
 		// It's okay if .env file doesn't exist
 		_ = err
 	}

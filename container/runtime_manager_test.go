@@ -864,6 +864,39 @@ func TestStart_ExtraMounts(t *testing.T) {
 	}
 }
 
+func TestStart_AddHosts(t *testing.T) {
+	var captured container.RunOptions
+
+	runner := &containertest.StubRunner{
+		RunFunc: func(_ context.Context, opts container.RunOptions) (string, error) {
+			captured = opts
+			return "abc123", nil
+		},
+	}
+
+	mgr := mustManager(t, runner, "test", 0)
+
+	cfg := &container.Config{
+		Image:    "img:latest",
+		AddHosts: []string{"proxyhost:host-gateway", "extra:10.0.0.1"},
+	}
+
+	_, err := mgr.Start(context.Background(), cfg, "/ws", "TEST-1", nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if len(captured.AddHosts) != 2 {
+		t.Fatalf("AddHosts count = %d, want 2", len(captured.AddHosts))
+	}
+	if captured.AddHosts[0] != "proxyhost:host-gateway" {
+		t.Errorf("AddHosts[0] = %q, want proxyhost:host-gateway", captured.AddHosts[0])
+	}
+	if captured.AddHosts[1] != "extra:10.0.0.1" {
+		t.Errorf("AddHosts[1] = %q, want extra:10.0.0.1", captured.AddHosts[1])
+	}
+}
+
 func TestStart_AllHostPolicyCombined(t *testing.T) {
 	var captured container.RunOptions
 

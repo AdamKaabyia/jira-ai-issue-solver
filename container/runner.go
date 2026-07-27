@@ -86,6 +86,11 @@ type RunOptions struct {
 	// Tmpfs holds --tmpfs mount specs (e.g., "/tmp:size=4g").
 	Tmpfs []string
 
+	// AddHosts holds --add-host entries (e.g.,
+	// "proxyhost:host-gateway"). Used to make the container
+	// resolve custom hostnames to the host machine.
+	AddHosts []string
+
 	// Command is the entrypoint command to keep the container alive
 	// (e.g., ["sleep", "infinity"]).
 	Command []string

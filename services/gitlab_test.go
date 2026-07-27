@@ -317,6 +317,89 @@ func TestGitLabCloneRepository(t *testing.T) {
 	}
 }
 
+func TestGitLabRestoreRemoteAuth(t *testing.T) {
+	tests := []struct {
+		name    string
+		baseURL string
+		owner   string
+		repo    string
+		wantURL string
+	}{
+		{
+			name:    "https self-hosted",
+			baseURL: "https://gitlab.cee.redhat.com",
+			owner:   "certification",
+			repo:    "rhcert-9",
+			wantURL: "https://oauth2:test-token@gitlab.cee.redhat.com/certification/rhcert-9.git",
+		},
+		{
+			name:    "https gitlab.com",
+			baseURL: "https://gitlab.com",
+			owner:   "org",
+			repo:    "repo",
+			wantURL: "https://oauth2:test-token@gitlab.com/org/repo.git",
+		},
+		{
+			name:    "trailing slash stripped",
+			baseURL: "https://gitlab.com/",
+			owner:   "org",
+			repo:    "repo",
+			wantURL: "https://oauth2:test-token@gitlab.com/org/repo.git",
+		},
+		{
+			name:    "http scheme preserved",
+			baseURL: "http://localhost:8929",
+			owner:   "dev",
+			repo:    "app",
+			wantURL: "http://oauth2:test-token@localhost:8929/dev/app.git",
+		},
+		{
+			name:    "nested group owner",
+			baseURL: "https://gitlab.cee.redhat.com",
+			owner:   "group/subgroup",
+			repo:    "project",
+			wantURL: "https://oauth2:test-token@gitlab.cee.redhat.com/group/subgroup/project.git",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tmpDir := t.TempDir()
+
+			// Initialize a bare git repo so SetRemoteURL works.
+			initCmd := exec.Command("git", "init", tmpDir)
+			if out, err := initCmd.CombinedOutput(); err != nil {
+				t.Fatalf("git init: %v: %s", err, out)
+			}
+			addRemote := exec.Command("git", "-C", tmpDir, "remote", "add", "origin", "https://placeholder.example.com/x/y.git")
+			if out, err := addRemote.CombinedOutput(); err != nil {
+				t.Fatalf("git remote add: %v: %s", err, out)
+			}
+
+			config := newTestGitLabConfig(tt.baseURL)
+			svc := NewGitLabService(config, zap.NewNop())
+
+			err := svc.RestoreRemoteAuth(tmpDir, tt.owner, tt.repo)
+			if err != nil {
+				t.Fatalf("RestoreRemoteAuth: %v", err)
+			}
+
+			// Read back the remote URL.
+			getURL := exec.Command("git", "-C", tmpDir, "remote", "get-url", "origin")
+			out, err := getURL.Output()
+			if err != nil {
+				t.Fatalf("git remote get-url: %v", err)
+			}
+
+			got := string(out)
+			got = got[:len(got)-1] // trim trailing newline
+			if got != tt.wantURL {
+				t.Errorf("remote URL = %q, want %q", got, tt.wantURL)
+			}
+		})
+	}
+}
+
 func TestExtractGitLabRepoInfo(t *testing.T) {
 	tests := []struct {
 		url       string

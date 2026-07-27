@@ -106,6 +106,11 @@ type Config struct {
 	// ExtraMounts holds additional volume mounts beyond the workspace.
 	ExtraMounts []Mount
 
+	// AddHosts holds --add-host entries injected at container
+	// creation (e.g., "proxyhost:host-gateway"). Used to let the
+	// container resolve custom hostnames pointing at the host.
+	AddHosts []string
+
 	// Source identifies which configuration file produced this config,
 	// for logging and debugging. Empty for built-in defaults.
 	Source string

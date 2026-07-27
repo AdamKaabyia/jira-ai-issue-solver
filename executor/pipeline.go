@@ -15,6 +15,7 @@ import (
 	"jira-ai-issue-solver/container"
 	"jira-ai-issue-solver/jobmanager"
 	"jira-ai-issue-solver/models"
+	"jira-ai-issue-solver/proxy"
 	"jira-ai-issue-solver/repoconfig"
 	"jira-ai-issue-solver/services"
 	"jira-ai-issue-solver/taskfile"
@@ -24,6 +25,11 @@ import (
 
 // Compile-time check that Pipeline implements Executor.
 var _ Executor = (*Pipeline)(nil)
+
+// proxyHostname is the hostname the container uses to reach the URL
+// translation proxy on the host. Resolved via --add-host at container
+// creation time.
+const proxyHostname = "aiproxy"
 
 // Pipeline implements the job execution pipelines for new tickets
 // and PR feedback. It coordinates workspace preparation, container
@@ -37,6 +43,11 @@ type Pipeline struct {
 	projects   ProjectResolver
 	cfg        Config
 	logger     *zap.Logger
+
+	// urlProxy is the URL translation proxy that rewrites Claude
+	// Code's Vertex AI paths to the upstream proxy's custom format.
+	// Nil when no proxy is needed.
+	urlProxy *proxy.Server
 }
 
 // NewPipeline creates a Pipeline with the given dependencies.
@@ -82,7 +93,7 @@ func NewPipeline(
 		return nil, errors.New("logger must not be nil")
 	}
 
-	return &Pipeline{
+	p := &Pipeline{
 		tracker:    issueTracker,
 		git:        git,
 		containers: containers,
@@ -91,7 +102,32 @@ func NewPipeline(
 		projects:   projects,
 		cfg:        cfg,
 		logger:     logger,
-	}, nil
+	}
+
+	if cfg.ClaudeProxy != nil && cfg.ClaudeProxy.VertexFormat {
+		srv, proxyErr := proxy.NewServer(proxy.Config{
+			TargetURL:   cfg.ClaudeProxy.BaseURL,
+			AuthToken:   cfg.ClaudeProxy.AuthToken,
+			RewritePath: proxy.VertexToModelsCorp,
+			Logger:      logger.Named("url-proxy"),
+		})
+		if proxyErr != nil {
+			return nil, fmt.Errorf("start URL translation proxy: %w", proxyErr)
+		}
+		srv.Start()
+		p.urlProxy = srv
+	}
+
+	return p, nil
+}
+
+// Close shuts down resources owned by the pipeline. Must be called
+// during graceful shutdown to stop the URL translation proxy (if any).
+func (p *Pipeline) Close() error {
+	if p.urlProxy != nil {
+		return p.urlProxy.Close()
+	}
+	return nil
 }
 
 // Execute dispatches a job by type. Matches [jobmanager.ExecuteFunc].
@@ -389,6 +425,13 @@ func (p *Pipeline) startContainer(
 		})
 	}
 
+	// When the URL translation proxy is active, let the container
+	// resolve its hostname to the host machine's IP.
+	if p.urlProxy != nil {
+		containerCfg.AddHosts = append(containerCfg.AddHosts,
+			proxyHostname+":host-gateway")
+	}
+
 	env := p.buildContainerEnv(provider)
 	return p.containers.Start(ctx, containerCfg, wsPath, ticketKey, env)
 }
@@ -638,14 +681,26 @@ func (p *Pipeline) buildContainerEnv(provider string) map[string]string {
 	switch provider {
 	case "claude":
 		if p.cfg.ClaudeProxy != nil {
-			env["ANTHROPIC_AUTH_TOKEN"] = p.cfg.ClaudeProxy.AuthToken
-			if p.cfg.ClaudeProxy.VertexFormat {
+			if p.cfg.ClaudeProxy.VertexFormat && p.urlProxy != nil {
+				// URL translation proxy is active: point Claude Code
+				// at the local proxy instead of the upstream directly.
+				// The proxy handles auth, so no ANTHROPIC_AUTH_TOKEN needed.
+				env["CLAUDE_CODE_USE_VERTEX"] = "1"
+				env["ANTHROPIC_VERTEX_BASE_URL"] = "http://" + proxyHostname + ":" + p.urlProxy.Port()
+				env["CLAUDE_CODE_SKIP_VERTEX_AUTH"] = "1"
+				env["CLOUD_ML_REGION"] = p.cfg.ClaudeProxy.VertexRegion
+				env["ANTHROPIC_VERTEX_PROJECT_ID"] = p.cfg.ClaudeProxy.VertexProjectID
+			} else if p.cfg.ClaudeProxy.VertexFormat {
+				// Vertex format without translation proxy (standard
+				// Vertex-compatible upstream).
+				env["ANTHROPIC_AUTH_TOKEN"] = p.cfg.ClaudeProxy.AuthToken
 				env["CLAUDE_CODE_USE_VERTEX"] = "1"
 				env["ANTHROPIC_VERTEX_BASE_URL"] = p.cfg.ClaudeProxy.BaseURL
 				env["CLAUDE_CODE_SKIP_VERTEX_AUTH"] = "1"
 				env["CLOUD_ML_REGION"] = p.cfg.ClaudeProxy.VertexRegion
 				env["ANTHROPIC_VERTEX_PROJECT_ID"] = p.cfg.ClaudeProxy.VertexProjectID
 			} else {
+				env["ANTHROPIC_AUTH_TOKEN"] = p.cfg.ClaudeProxy.AuthToken
 				env["ANTHROPIC_BASE_URL"] = p.cfg.ClaudeProxy.BaseURL
 			}
 		} else if p.cfg.ClaudeVertex != nil {

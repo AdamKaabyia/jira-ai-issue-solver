@@ -84,11 +84,12 @@ func (s *GitLabServiceImpl) CloneImport(url, destDir, ref string) error {
 func (s *GitLabServiceImpl) RestoreRemoteAuth(directory, owner, repo string) error {
 	token := s.config.GitLab.AccessToken
 	baseURL := strings.TrimSuffix(s.config.GitLab.BaseURL, "/")
-	authURL := fmt.Sprintf("%s/oauth2:%s@%s/%s/%s.git",
-		strings.Replace(baseURL, "https://", "https://", 1),
-		token,
-		strings.TrimPrefix(strings.TrimPrefix(baseURL, "https://"), "http://"),
-		owner, repo)
+	host := strings.TrimPrefix(strings.TrimPrefix(baseURL, "https://"), "http://")
+	scheme := "https://"
+	if strings.HasPrefix(baseURL, "http://") {
+		scheme = "http://"
+	}
+	authURL := fmt.Sprintf("%soauth2:%s@%s/%s/%s.git", scheme, token, host, owner, repo)
 
 	return s.gitOps.SetRemoteURL(directory, authURL)
 }

@@ -123,6 +123,7 @@ func (m *RuntimeManager) Start(ctx context.Context, cfg *Config, workspaceDir, t
 		SecurityOpt: securityOpt,
 		UserNS:      cfg.UserNS,
 		Tmpfs:       cfg.Tmpfs,
+		AddHosts:    cfg.AddHosts,
 		Command:     []string{"sleep", "infinity"},
 	}
 
