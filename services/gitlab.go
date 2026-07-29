@@ -450,7 +450,8 @@ func (s *GitLabServiceImpl) ReplyToComment(owner, repo string, prNumber int, com
 	discussionID, err := s.findDiscussionForNote(projectID, prNumber, commentID)
 	if err != nil || discussionID == "" {
 		// Fall back to posting a new note referencing the original.
-		return s.PostIssueComment(owner, repo, prNumber, body)
+		_, postErr := s.PostIssueComment(owner, repo, prNumber, body)
+		return postErr
 	}
 
 	url := fmt.Sprintf("%s/api/v4/projects/%s/merge_requests/%d/discussions/%s/notes",
@@ -470,7 +471,7 @@ func (s *GitLabServiceImpl) ReplyToComment(owner, repo string, prNumber int, com
 	return nil
 }
 
-func (s *GitLabServiceImpl) PostIssueComment(owner, repo string, prNumber int, body string) error {
+func (s *GitLabServiceImpl) PostIssueComment(owner, repo string, prNumber int, body string) (int64, error) {
 	projectID := s.projectPath(owner, repo)
 	url := fmt.Sprintf("%s/api/v4/projects/%s/merge_requests/%d/notes",
 		s.config.GitLab.BaseURL, projectID, prNumber)
@@ -478,15 +479,20 @@ func (s *GitLabServiceImpl) PostIssueComment(owner, repo string, prNumber int, b
 	reqBody := map[string]interface{}{"body": body}
 	resp, err := s.doJSONRequest("POST", url, reqBody)
 	if err != nil {
-		return fmt.Errorf("post MR note: %w", err)
+		return 0, fmt.Errorf("post MR note: %w", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode >= 300 {
 		respBody, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("post MR note: status %d, body: %s", resp.StatusCode, string(respBody))
+		return 0, fmt.Errorf("post MR note: status %d, body: %s", resp.StatusCode, string(respBody))
 	}
-	return nil
+
+	var note struct {
+		ID int64 `json:"id"`
+	}
+	_ = json.NewDecoder(resp.Body).Decode(&note)
+	return note.ID, nil
 }
 
 func (s *GitLabServiceImpl) ListIssueComments(owner, repo string, prNumber int) ([]models.IssueComment, error) {

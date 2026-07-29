@@ -78,9 +78,9 @@ func (p *stubProvider) ReplyToComment(owner, repo string, prNumber int, commentI
 	p.calls = append(p.calls, "ReplyToComment")
 	return nil
 }
-func (p *stubProvider) PostIssueComment(owner, repo string, prNumber int, body string) error {
+func (p *stubProvider) PostIssueComment(owner, repo string, prNumber int, body string) (int64, error) {
 	p.calls = append(p.calls, "PostIssueComment")
-	return nil
+	return 0, nil
 }
 func (p *stubProvider) ListIssueComments(owner, repo string, prNumber int) ([]models.IssueComment, error) {
 	p.calls = append(p.calls, "ListIssueComments")

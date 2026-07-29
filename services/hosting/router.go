@@ -43,7 +43,7 @@ type Provider interface {
 	GetPRForBranch(owner, repo, head string) (*models.PRDetails, error)
 	GetPRComments(owner, repo string, number int, since time.Time) ([]models.PRComment, error)
 	ReplyToComment(owner, repo string, prNumber int, commentID int64, body string) error
-	PostIssueComment(owner, repo string, prNumber int, body string) error
+	PostIssueComment(owner, repo string, prNumber int, body string) (int64, error)
 	ListIssueComments(owner, repo string, prNumber int) ([]models.IssueComment, error)
 	UpdateIssueComment(owner, repo string, commentID int64, body string) error
 	AddCommentReaction(owner, repo string, comment models.PRComment, reaction string) error
@@ -221,7 +221,7 @@ func (r *Router) ReplyToComment(owner, repo string, prNumber int, commentID int6
 	return r.forRepo(owner, repo).ReplyToComment(owner, repo, prNumber, commentID, body)
 }
 
-func (r *Router) PostIssueComment(owner, repo string, prNumber int, body string) error {
+func (r *Router) PostIssueComment(owner, repo string, prNumber int, body string) (int64, error) {
 	return r.forRepo(owner, repo).PostIssueComment(owner, repo, prNumber, body)
 }
 
