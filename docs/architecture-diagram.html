@@ -1,0 +1,1406 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Jira AI Issue Solver — Architecture</title>
+<style>
+  :root {
+    --bg: #0d1117;
+    --surface: #161b22;
+    --surface2: #1c2333;
+    --border: #30363d;
+    --text: #e6edf3;
+    --text-muted: #8b949e;
+    --accent: #58a6ff;
+    --accent2: #3fb950;
+    --accent3: #d2a8ff;
+    --accent4: #f0883e;
+    --accent5: #f778ba;
+    --red: #f85149;
+    --yellow: #d29922;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    line-height: 1.6;
+    padding: 2rem;
+  }
+  h1 { font-size: 1.8rem; margin-bottom: .25rem; }
+  h2 {
+    font-size: 1.3rem;
+    color: var(--accent);
+    margin: 2.5rem 0 1rem;
+    padding-bottom: .4rem;
+    border-bottom: 1px solid var(--border);
+  }
+  h3 { font-size: 1.05rem; color: var(--accent3); margin: 1.2rem 0 .5rem; }
+  p, li { color: var(--text-muted); font-size: .92rem; }
+  a { color: var(--accent); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  code {
+    background: var(--surface2);
+    padding: .15em .35em;
+    border-radius: 4px;
+    font-size: .85em;
+    color: var(--accent3);
+  }
+  .subtitle { color: var(--text-muted); margin-bottom: 2rem; font-size: .95rem; }
+
+  /* ── diagram canvas ─────────────────────────────── */
+  .diagram {
+    position: relative;
+    width: 100%;
+    max-width: 1100px;
+    margin: 0 auto;
+  }
+  svg.lines {
+    position: absolute;
+    top: 0; left: 0;
+    width: 100%;
+    height: 100%;
+    pointer-events: none;
+    z-index: 0;
+  }
+  svg.lines line, svg.lines path {
+    stroke: var(--border);
+    stroke-width: 2;
+    fill: none;
+  }
+  svg.lines .arrow { marker-end: url(#arrowhead); }
+  svg.lines .data  { stroke-dasharray: 6 4; stroke: var(--text-muted); }
+
+  /* ── boxes ──────────────────────────────────────── */
+  .box {
+    position: relative;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 1rem 1.2rem;
+    margin-bottom: 1rem;
+    z-index: 1;
+    transition: border-color .2s, box-shadow .2s;
+  }
+  .box:hover { border-color: var(--accent); box-shadow: 0 0 12px rgba(88,166,255,.15); }
+  .box .label {
+    font-weight: 600;
+    font-size: .95rem;
+    color: var(--text);
+    display: flex;
+    align-items: center;
+    gap: .5rem;
+  }
+  .box .desc { font-size: .82rem; color: var(--text-muted); margin-top: .3rem; }
+  .badge {
+    display: inline-block;
+    font-size: .65rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: .05em;
+    padding: .15em .45em;
+    border-radius: 4px;
+    vertical-align: middle;
+  }
+  .badge-blue   { background: rgba(88,166,255,.15); color: var(--accent); }
+  .badge-green  { background: rgba(63,185,80,.15);  color: var(--accent2); }
+  .badge-purple { background: rgba(210,168,255,.15); color: var(--accent3); }
+  .badge-orange { background: rgba(240,136,62,.15);  color: var(--accent4); }
+  .badge-pink   { background: rgba(247,120,186,.15); color: var(--accent5); }
+  .badge-red    { background: rgba(248,81,73,.15);   color: var(--red); }
+  .badge-yellow { background: rgba(210,153,34,.15);  color: var(--yellow); }
+
+  /* ── grid layouts ───────────────────────────────── */
+  .row { display: flex; gap: 1rem; flex-wrap: wrap; }
+  .row > * { flex: 1; min-width: 220px; }
+  .row-3 > * { flex: 1 1 30%; }
+  .row-4 > * { flex: 1 1 22%; }
+
+  /* ── expandable details ─────────────────────────── */
+  details { margin-bottom: .6rem; }
+  details summary {
+    cursor: pointer;
+    font-weight: 600;
+    font-size: .9rem;
+    color: var(--text);
+    padding: .5rem .8rem;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    list-style: none;
+    display: flex;
+    align-items: center;
+    gap: .5rem;
+    transition: border-color .2s;
+  }
+  details summary:hover { border-color: var(--accent); }
+  details summary::before {
+    content: '▸';
+    display: inline-block;
+    transition: transform .2s;
+    font-size: .8rem;
+    color: var(--text-muted);
+  }
+  details[open] summary::before { transform: rotate(90deg); }
+  details .inner {
+    padding: .8rem 1rem;
+    margin-top: .3rem;
+    background: var(--surface2);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    font-size: .85rem;
+    color: var(--text-muted);
+  }
+  details .inner ul { padding-left: 1.2rem; }
+  details .inner li { margin-bottom: .3rem; }
+  details .inner code { font-size: .8em; }
+
+  /* ── pipeline steps ─────────────────────────────── */
+  .steps { counter-reset: step; padding: 0; list-style: none; }
+  .steps li {
+    position: relative;
+    padding: .4rem 0 .4rem 2.5rem;
+    font-size: .85rem;
+    color: var(--text-muted);
+  }
+  .steps li::before {
+    counter-increment: step;
+    content: counter(step);
+    position: absolute;
+    left: 0; top: .35rem;
+    width: 1.6rem; height: 1.6rem;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 50%;
+    text-align: center;
+    line-height: 1.6rem;
+    font-size: .7rem;
+    font-weight: 700;
+    color: var(--accent);
+  }
+  .steps li.fail::before { border-color: var(--red); color: var(--red); }
+
+  /* ── alert box ──────────────────────────────────── */
+  .alert {
+    background: rgba(248,81,73,.08);
+    border: 1px solid rgba(248,81,73,.3);
+    border-radius: 8px;
+    padding: 1rem 1.2rem;
+    margin: 1rem 0;
+  }
+  .alert .title { font-weight: 700; color: var(--red); font-size: .9rem; margin-bottom: .3rem; }
+  .alert p { font-size: .85rem; }
+
+  .info-box {
+    background: rgba(88,166,255,.06);
+    border: 1px solid rgba(88,166,255,.2);
+    border-radius: 8px;
+    padding: 1rem 1.2rem;
+    margin: 1rem 0;
+  }
+  .info-box .title { font-weight: 700; color: var(--accent); font-size: .9rem; margin-bottom: .3rem; }
+  .info-box p, .info-box li { font-size: .85rem; }
+
+  /* ── config snippet ─────────────────────────────── */
+  pre {
+    background: var(--surface2);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 1rem;
+    font-size: .8rem;
+    overflow-x: auto;
+    color: var(--text-muted);
+    line-height: 1.5;
+    margin: .6rem 0;
+  }
+  pre .cm { color: #6e7681; }
+  pre .kw { color: var(--accent); }
+  pre .val { color: var(--accent2); }
+  pre .str { color: #a5d6ff; }
+
+  /* ── connector arrows (pure CSS) ────────────────── */
+  .arrow-down {
+    display: flex;
+    justify-content: center;
+    padding: .3rem 0;
+    color: var(--text-muted);
+    font-size: 1.2rem;
+  }
+
+  /* ── sticky TOC nav ──────────────────────────────── */
+  .toc-nav {
+    position: sticky;
+    top: 0;
+    z-index: 100;
+    background: var(--surface);
+    border-bottom: 1px solid var(--border);
+    padding: .5rem 1rem;
+    margin: -2rem -2rem 2rem -2rem;
+    display: flex;
+    flex-wrap: wrap;
+    gap: .3rem .6rem;
+    align-items: center;
+    backdrop-filter: blur(8px);
+  }
+  .toc-nav a {
+    font-size: .72rem;
+    color: var(--text-muted);
+    text-decoration: none;
+    padding: .2rem .5rem;
+    border-radius: 4px;
+    white-space: nowrap;
+    transition: background .15s, color .15s;
+  }
+  .toc-nav a:hover {
+    background: var(--surface2);
+    color: var(--accent);
+    text-decoration: none;
+  }
+  .toc-nav .toc-label {
+    font-size: .7rem;
+    font-weight: 700;
+    color: var(--text-muted);
+    text-transform: uppercase;
+    letter-spacing: .06em;
+    margin-right: .2rem;
+  }
+  .toc-nav .sep {
+    color: var(--border);
+    font-size: .7rem;
+  }
+
+  /* ── file tree ──────────────────────────────────── */
+  .file-tree {
+    background: var(--surface2);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 1rem 1.2rem;
+    font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, monospace;
+    font-size: .8rem;
+    line-height: 1.7;
+    color: var(--text-muted);
+    margin: .6rem 0;
+    overflow-x: auto;
+  }
+  .file-tree .dir { color: var(--accent); }
+  .file-tree .file { color: var(--text-muted); }
+  .file-tree .note { color: var(--accent3); font-style: italic; }
+
+  /* ── side-by-side comparison ─────────────────────── */
+  .compare {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 1rem;
+    margin: 1rem 0;
+  }
+  @media (max-width: 700px) {
+    .compare { grid-template-columns: 1fr; }
+  }
+  .compare-col {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 1rem;
+  }
+  .compare-col .compare-title {
+    font-weight: 700;
+    font-size: .85rem;
+    margin-bottom: .5rem;
+    padding-bottom: .3rem;
+    border-bottom: 1px solid var(--border);
+  }
+  .compare-col.before .compare-title { color: var(--red); }
+  .compare-col.after .compare-title { color: var(--accent2); }
+
+  /* ── level progression ──────────────────────────── */
+  .level-badge {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 1.5rem;
+    height: 1.5rem;
+    border-radius: 50%;
+    font-size: .7rem;
+    font-weight: 700;
+    margin-right: .4rem;
+    flex-shrink: 0;
+  }
+  .level-1 { background: rgba(63,185,80,.15); color: var(--accent2); }
+  .level-2 { background: rgba(88,166,255,.15); color: var(--accent); }
+  .level-3 { background: rgba(210,168,255,.15); color: var(--accent3); }
+  .level-4 { background: rgba(240,136,62,.15); color: var(--accent4); }
+  .level-5 { background: rgba(247,120,186,.15); color: var(--accent5); }
+
+  /* ── network flow diagram ───────────────────────── */
+  .net-flow {
+    background: var(--surface2);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 1rem 1.2rem;
+    margin: .6rem 0;
+    font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, monospace;
+    font-size: .78rem;
+    line-height: 1.8;
+    color: var(--text-muted);
+    overflow-x: auto;
+  }
+  .net-flow .host { color: var(--accent2); font-weight: 600; }
+  .net-flow .arrow { color: var(--accent); }
+  .net-flow .port { color: var(--accent4); }
+  .net-flow .comment { color: #6e7681; font-style: italic; }
+
+  /* smooth scroll for anchor links */
+  html { scroll-behavior: smooth; scroll-padding-top: 3.5rem; }
+
+  /* ── footer ─────────────────────────────────────── */
+  .footer {
+    margin-top: 3rem;
+    padding-top: 1rem;
+    border-top: 1px solid var(--border);
+    font-size: .75rem;
+    color: var(--text-muted);
+    text-align: center;
+  }
+</style>
+</head>
+<body>
+
+<nav class="toc-nav">
+  <span class="toc-label">Sections</span>
+  <a href="#s1">1. Data Flow</a><span class="sep">/</span>
+  <a href="#s2">2. APIs</a><span class="sep">/</span>
+  <a href="#s3">3. LLM Usage</a><span class="sep">/</span>
+  <a href="#s4">4. Pipeline</a><span class="sep">/</span>
+  <a href="#s5">5. Failure</a><span class="sep">/</span>
+  <a href="#s6">6. Auth</a><span class="sep">/</span>
+  <a href="#s7">7. Local Model</a><span class="sep">/</span>
+  <a href="#s8">8. Packages</a><span class="sep">/</span>
+  <a href="#s9">9. How AI Edits Code</a><span class="sep">/</span>
+  <a href="#s10">10. Quality Guide</a><span class="sep">/</span>
+  <a href="#s11">11. Local Model Setup</a>
+</nav>
+
+<h1>Jira AI Issue Solver</h1>
+<p class="subtitle">Interactive architecture reference &mdash; how every component connects, which APIs are called, and where the LLM fits in.</p>
+
+<!-- ============================================================ -->
+<h2 id="s1">1. High-Level Data Flow</h2>
+
+<div class="diagram">
+
+  <div class="box" style="text-align:center; border-color: var(--accent);">
+    <div class="label" style="justify-content:center;">
+      <span class="badge badge-blue">Entry Point</span>
+      <code>main.go</code> &mdash; Service Wiring &amp; Startup
+    </div>
+    <div class="desc">Loads config, creates all services via dependency injection, runs crash recovery, starts scanners + HTTP health server.</div>
+  </div>
+
+  <div class="arrow-down">&#x25BC;</div>
+
+  <div class="row row-4">
+    <div class="box">
+      <div class="label"><span class="badge badge-green">Scanner</span> WorkItemScanner</div>
+      <div class="desc">Polls Jira for tickets in <strong>todo</strong> status where contributor = bot account. Submits <code>new_ticket</code> jobs.</div>
+    </div>
+    <div class="box">
+      <div class="label"><span class="badge badge-green">Scanner</span> FeedbackScanner</div>
+      <div class="desc">Polls Jira for tickets in <strong>in_review</strong> status. Checks each ticket's MR(s) for unaddressed review comments. Submits <code>feedback</code> jobs.</div>
+    </div>
+    <div class="box">
+      <div class="label"><span class="badge badge-green">Scanner</span> MergeScanner</div>
+      <div class="desc">Checks if all MRs for an in-review ticket are merged. Transitions ticket + applies lifecycle labels.</div>
+    </div>
+    <div class="box">
+      <div class="label"><span class="badge badge-green">Scanner</span> CleanupScanner</div>
+      <div class="desc">Purges workspaces whose tickets are no longer in active statuses (TTL-based cleanup).</div>
+    </div>
+  </div>
+
+  <div class="arrow-down">&#x25BC; submit jobs</div>
+
+  <div class="box" style="border-color: var(--accent4);">
+    <div class="label"><span class="badge badge-orange">Coordinator</span> Job Manager <code>jobmanager/</code></div>
+    <div class="desc">
+      Accepts jobs, enforces guardrails, dispatches to executor.<br>
+      <strong>Concurrency:</strong> max N parallel jobs &bull;
+      <strong>Retries:</strong> up to M attempts per ticket &bull;
+      <strong>Circuit breaker:</strong> pauses after repeated failures &bull;
+      <strong>Cost budget:</strong> daily USD cap
+    </div>
+  </div>
+
+  <div class="arrow-down">&#x25BC; dispatch</div>
+
+  <div class="box" style="border-color: var(--accent3);">
+    <div class="label"><span class="badge badge-purple">Pipeline</span> Executor <code>executor/pipeline.go</code></div>
+    <div class="desc">Orchestrates the full lifecycle: workspace &rarr; branch &rarr; task file &rarr; container &rarr; AI &rarr; commit &rarr; MR &rarr; Jira update. See step-by-step below.</div>
+  </div>
+
+  <div class="arrow-down">&#x25BC; uses</div>
+
+  <div class="row row-3">
+    <div class="box">
+      <div class="label"><span class="badge badge-blue">Infra</span> Workspace Manager</div>
+      <div class="desc"><code>workspace/</code> &mdash; clones repos, manages per-ticket directories under <code>workspaces.base_dir</code>. Reuses existing workspaces on retry.</div>
+    </div>
+    <div class="box">
+      <div class="label"><span class="badge badge-blue">Infra</span> Container Manager</div>
+      <div class="desc"><code>container/</code> &mdash; detects podman/docker, pulls images, starts containers with <code>sleep infinity</code>, execs commands, stops &amp; removes.</div>
+    </div>
+    <div class="box">
+      <div class="label"><span class="badge badge-blue">Infra</span> Task File Writer</div>
+      <div class="desc"><code>taskfile/</code> &mdash; generates <code>.ai-session/task.md</code> and <code>.ai-session/issue.md</code> from the Jira ticket, with per-repo instructions and workflow overrides.</div>
+    </div>
+  </div>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="s2">2. External APIs</h2>
+
+<div class="row row-3">
+  <div class="box" style="border-color: var(--accent);">
+    <div class="label"><span class="badge badge-blue">API</span> Jira Cloud REST</div>
+    <div class="desc">
+      <strong>Host:</strong> <code>redhat.atlassian.net</code><br>
+      <strong>Auth:</strong> Basic (email + API token)<br>
+      <strong>Code:</strong> <code>services/jira.go</code> &rarr; <code>tracker/jira/</code> adapter<br><br>
+      <strong>Operations:</strong>
+    </div>
+    <ul style="font-size:.82rem; color:var(--text-muted); padding-left:1.2rem; margin-top:.3rem;">
+      <li>POST <code>/search/jql</code> &mdash; find tickets by status</li>
+      <li>GET <code>/issue/{key}</code> &mdash; ticket details</li>
+      <li>POST <code>/issue/{key}/transitions</code> &mdash; change status</li>
+      <li>POST/DELETE <code>/issue/{key}/comment</code> &mdash; manage comments</li>
+      <li>GET attachment content URLs &mdash; download files</li>
+    </ul>
+  </div>
+
+  <div class="box" style="border-color: var(--accent2);">
+    <div class="label"><span class="badge badge-green">API</span> GitLab REST</div>
+    <div class="desc">
+      <strong>Host:</strong> <code>gitlab.cee.redhat.com</code><br>
+      <strong>Auth:</strong> PAT via <code>PRIVATE-TOKEN</code> header + <code>oauth2:TOKEN@</code> in git URLs<br>
+      <strong>Code:</strong> <code>services/gitlab.go</code> &rarr; <code>services/hosting/</code> router<br><br>
+      <strong>Operations:</strong>
+    </div>
+    <ul style="font-size:.82rem; color:var(--text-muted); padding-left:1.2rem; margin-top:.3rem;">
+      <li>Git clone / fetch / push (CLI with auth URL)</li>
+      <li>POST <code>/projects/:id/merge_requests</code> &mdash; create MR</li>
+      <li>GET MR comments &mdash; review feedback</li>
+      <li>POST MR notes &mdash; reply to reviews</li>
+      <li>PUT labels on MRs</li>
+      <li>GET merge status, pipeline status</li>
+    </ul>
+  </div>
+
+  <div class="box" style="border-color: var(--accent3);">
+    <div class="label"><span class="badge badge-purple">API</span> AI Model (from container)</div>
+    <div class="desc">
+      <strong>Called by:</strong> Claude Code CLI or Gemini CLI <em>inside</em> the container &mdash; NOT by the Go bot.<br>
+      <strong>Auth:</strong> via env vars set by the bot<br><br>
+      <strong>Possible backends:</strong>
+    </div>
+    <ul style="font-size:.82rem; color:var(--text-muted); padding-left:1.2rem; margin-top:.3rem;">
+      <li><strong>Anthropic API</strong> &mdash; <code>ANTHROPIC_API_KEY</code></li>
+      <li><strong>Vertex AI</strong> &mdash; <code>GOOGLE_APPLICATION_CREDENTIALS</code> + GCP project</li>
+      <li><strong>Models.corp proxy</strong> &mdash; <code>ANTHROPIC_VERTEX_BASE_URL</code> + URL translation proxy</li>
+      <li><strong>Gemini API</strong> &mdash; <code>GEMINI_API_KEY</code> (OpenAI-compatible)</li>
+      <li><strong>Local model</strong> &mdash; <code>ANTHROPIC_BASE_URL=http://localhost:...</code></li>
+    </ul>
+  </div>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="s3">3. How the LLM Is Used</h2>
+
+<div class="info-box">
+  <div class="title">Key insight: No multi-agent orchestration</div>
+  <p>The bot does <strong>not</strong> implement chains, RAG, or multi-agent patterns. It makes exactly <strong>one CLI invocation</strong> per job: start the AI CLI, give it a task file, wait for it to finish, collect the results.</p>
+</div>
+
+<div class="box" style="border-color: var(--accent3);">
+  <div class="label"><span class="badge badge-purple">LLM Flow</span> Single AI Session</div>
+</div>
+
+<div style="display: grid; grid-template-columns: 40px 1fr; gap: .2rem .8rem; max-width: 850px; margin: 0 auto;">
+
+  <div style="text-align:center; color:var(--accent); font-weight:700; font-size:.85rem; padding-top:.25rem;">A</div>
+  <div class="box" style="margin-bottom:.4rem;">
+    <div class="label">Bot writes task files</div>
+    <div class="desc">
+      <code>.ai-session/task.md</code> &mdash; "Implement CERTPX-17737: GPUVendorDetector extensions. Validate your changes compile and pass tests."<br>
+      <code>.ai-session/issue.md</code> &mdash; Full Jira ticket description, acceptance criteria, file hints.<br>
+      Generated by <code>taskfile/</code> package. Includes per-repo instructions + workflow overrides from profiles.
+    </div>
+  </div>
+
+  <div style="text-align:center; color:var(--accent); font-weight:700; font-size:.85rem; padding-top:.25rem;">B</div>
+  <div class="box" style="margin-bottom:.4rem;">
+    <div class="label">Bot starts a container</div>
+    <div class="desc">
+      <code>podman run -d --pull=never ghcr.io/zeroae/claude-code:latest sleep infinity</code><br>
+      Mounts your workspace at <code>/workspace</code>. Sets env vars for AI authentication.<br>
+      Defined in <code>container/runtime_manager.go</code>.
+    </div>
+  </div>
+
+  <div style="text-align:center; color:var(--accent); font-weight:700; font-size:.85rem; padding-top:.25rem;">C</div>
+  <div class="box" style="margin-bottom:.4rem; border-color: var(--accent5);">
+    <div class="label"><span class="badge badge-pink">AI Execution</span> One CLI command</div>
+    <div class="desc">
+      <strong>Claude:</strong><br>
+      <code>claude --dangerously-skip-permissions --output-format json --verbose -p "Read /workspace/.ai-session/task.md and complete the task described there."</code><br><br>
+      <strong>Gemini:</strong><br>
+      <code>gemini -y --output-format json -p "Read /workspace/.ai-session/task.md and complete the task described there."</code><br><br>
+      Defined in <code>executor/script.go</code>. The CLI tool is itself an autonomous agent &mdash; it reads files, edits code, runs tests inside the container. But the bot treats it as a black-box subprocess.
+    </div>
+  </div>
+
+  <div style="text-align:center; color:var(--accent); font-weight:700; font-size:.85rem; padding-top:.25rem;">D</div>
+  <div class="box" style="margin-bottom:.4rem;">
+    <div class="label">Bot collects output</div>
+    <div class="desc">
+      Reads <code>.ai-session/session-output.json</code> for exit code and cost.<br>
+      Reads <code>.ai-session/cli-output.json</code> for token counts.<br>
+      Reads <code>.ai-session/pr.md</code> (if present) for AI-generated MR description.<br>
+      Checks <code>git status</code> for changed files.
+    </div>
+  </div>
+
+  <div style="text-align:center; color:var(--accent); font-weight:700; font-size:.85rem; padding-top:.25rem;">E</div>
+  <div class="box" style="margin-bottom:.4rem;">
+    <div class="label">Bot commits and creates MR</div>
+    <div class="desc">
+      Pushes changes via <code>git push</code> with authenticated URL.<br>
+      Creates a Merge Request via the GitLab API.<br>
+      Posts the MR link as a Jira comment, transitions ticket to "in review".
+    </div>
+  </div>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="s4">4. New-Ticket Pipeline (17 Steps)</h2>
+
+<details>
+  <summary><span class="badge badge-purple">Pipeline</span> Full step-by-step for <code>executeNewTicket()</code></summary>
+  <div class="inner">
+    <ol class="steps">
+      <li>Fetch work item details from Jira (<code>GET /issue/{key}</code>)</li>
+      <li>Resolve project settings: which repo, status names, profiles, container image</li>
+      <li>Validate fork-mode requirements and per-ticket cost cap</li>
+      <li>Transition ticket to <strong>in-progress</strong> status (<code>POST /transitions</code>)</li>
+      <li>Prepare workspace: <code>git clone</code> the repo (or reuse existing)</li>
+      <li>Create branch: <code>git checkout -b ai-bot/CERTPX-17737</code></li>
+      <li>Load repo config: reads <code>.ai-bot/config.yaml</code> from the cloned repo</li>
+      <li>Clone imports: auxiliary repos for shared tools/context</li>
+      <li>Write <code>.ai-session/issue.md</code> and <code>.ai-session/task.md</code></li>
+      <li>Determine AI provider: project setting &rarr; default from config</li>
+      <li>Build AI CLI command (<code>executor/script.go</code>)</li>
+      <li>Pull container image + start container with <code>sleep infinity</code></li>
+      <li>Run import install commands inside container</li>
+      <li>Strip remote auth from <code>.git/config</code> (prevent AI from pushing)</li>
+      <li class="fail"><strong>Execute AI CLI</strong> inside container &mdash; this is the single LLM invocation</li>
+      <li>Restore remote auth, commit changes via <code>git push</code></li>
+      <li>Create Merge Request, update Jira ticket with MR link, transition to <strong>in-review</strong></li>
+    </ol>
+  </div>
+</details>
+
+<details>
+  <summary><span class="badge badge-green">Pipeline</span> Feedback pipeline (when reviewers comment on MR)</summary>
+  <div class="inner">
+    <ol class="steps">
+      <li>Fetch ticket + resolve project settings</li>
+      <li>Find open MR by branch name (<code>ai-bot/CERTPX-17737</code>)</li>
+      <li>Find or recreate workspace (self-healing if cleaned up)</li>
+      <li>Switch to MR branch, sync with remote</li>
+      <li>Fetch MR comments, filter bot-authored and ignored users</li>
+      <li>Write feedback task file with review comments</li>
+      <li>Resolve container, execute AI, check for changes</li>
+      <li>Commit changes via <code>git push</code></li>
+      <li>Reply to addressed MR comments</li>
+    </ol>
+    <p style="margin-top:.5rem;">Key difference: no branch creation, no MR creation, no status transition. Reuses existing workspace and MR.</p>
+  </div>
+</details>
+
+<!-- ============================================================ -->
+<h2 id="s5">5. Your Current Failure</h2>
+
+<div class="alert">
+  <div class="title">Claude Code refused to run &mdash; container runs as root</div>
+  <p>
+    The <code>session.log</code> from your CERTPX-17737 run contains exactly one line:<br><br>
+    <code style="color:var(--red);">--dangerously-skip-permissions cannot be used with root/sudo privileges for security reasons</code><br><br>
+    <strong>What happened:</strong>
+  </p>
+  <ul style="margin-top:.4rem;">
+    <li><code>ghcr.io/zeroae/claude-code:latest</code> runs the container process as <strong>root</strong> (UID 0).</li>
+    <li>Claude Code CLI has a safety check that blocks <code>--dangerously-skip-permissions</code> when running as root.</li>
+    <li>The CLI exited immediately with <strong>exit code 1</strong>. Zero tokens consumed (<code>cost_usd: 0</code>).</li>
+    <li>The only "changes" were the <code>.ai-session/</code> metadata files (task.md, issue.md, etc.).</li>
+    <li>The bot saw those as changes, committed them, and created MR #1752 with no actual code.</li>
+  </ul>
+  <p style="margin-top:.6rem;">
+    <strong>Fix:</strong> The container must run the Claude Code CLI as a <strong>non-root user</strong>. Options:<br>
+    &bull; Build a custom image with a non-root user (e.g., <code>USER node</code> in Dockerfile)<br>
+    &bull; Use <code>podman run --user 1000:1000</code> (configure via container settings in <code>config.yaml</code>)<br>
+    &bull; Find/use an image that already runs as non-root
+  </p>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="s6">6. AI Authentication Paths</h2>
+
+<p style="margin-bottom: 1rem;">The bot sets environment variables inside the container. The AI CLI reads them to know where to send API requests. Here are all supported paths:</p>
+
+<details>
+  <summary><span class="badge badge-blue">Auth</span> Direct Anthropic API key</summary>
+  <div class="inner">
+    <p>Simplest mode. Requires a direct Anthropic API key.</p>
+    <pre><span class="cm"># config.yaml</span>
+<span class="kw">claude</span>:
+  <span class="kw">api_key</span>: <span class="str">"sk-ant-..."</span></pre>
+    <p>Container env: <code>ANTHROPIC_API_KEY=sk-ant-...</code></p>
+    <p>Claude Code CLI calls <code>api.anthropic.com</code> directly.</p>
+  </div>
+</details>
+
+<details>
+  <summary><span class="badge badge-green">Auth</span> Google Vertex AI (GCP credentials)</summary>
+  <div class="inner">
+    <p>Uses a GCP service account key file, mounted into the container.</p>
+    <pre><span class="cm"># config.yaml</span>
+<span class="kw">claude</span>:
+  <span class="kw">vertex_project_id</span>: <span class="str">"my-gcp-project"</span>
+  <span class="kw">vertex_region</span>: <span class="str">"us-east5"</span>
+  <span class="kw">vertex_credentials_file</span>: <span class="str">"/path/to/sa-key.json"</span></pre>
+    <p>Container env: <code>CLAUDE_CODE_USE_VERTEX=1</code>, <code>GOOGLE_APPLICATION_CREDENTIALS=/run/secrets/gcp-sa-key.json</code></p>
+    <p>The key file is mounted read-only at <code>/run/secrets/gcp-sa-key.json</code>.</p>
+  </div>
+</details>
+
+<details>
+  <summary><span class="badge badge-orange">Auth</span> API Proxy (e.g., Models.corp) &mdash; your setup</summary>
+  <div class="inner">
+    <p>Routes requests through a corporate proxy that handles upstream auth. Two sub-modes:</p>
+    <h3>Non-Vertex format (simple proxy)</h3>
+    <pre><span class="cm"># config.yaml</span>
+<span class="kw">claude</span>:
+  <span class="kw">proxy_url</span>: <span class="str">"https://my-proxy.corp.com"</span>
+  <span class="kw">proxy_auth_token</span>: <span class="str">"bearer-token-here"</span></pre>
+    <p>Container env: <code>ANTHROPIC_BASE_URL=https://my-proxy.corp.com</code>, <code>ANTHROPIC_AUTH_TOKEN=bearer-token-here</code></p>
+
+    <h3>Vertex format (Models.corp with URL translation)</h3>
+    <pre><span class="cm"># config.yaml</span>
+<span class="kw">claude</span>:
+  <span class="kw">proxy_url</span>: <span class="str">"https://models.corp.redhat.com"</span>
+  <span class="kw">proxy_auth_token</span>: <span class="str">"bearer-token-here"</span>
+  <span class="kw">proxy_vertex_format</span>: <span class="val">true</span>
+  <span class="kw">vertex_project_id</span>: <span class="str">"placeholder"</span>
+  <span class="kw">vertex_region</span>: <span class="str">"placeholder"</span></pre>
+    <p>The bot starts a <strong>local URL translation proxy</strong> (<code>proxy/proxy.go</code>) that:</p>
+    <ul>
+      <li>Listens on <code>localhost:&lt;random-port&gt;</code></li>
+      <li>Rewrites Claude Code's Vertex AI paths to Models.corp's custom format (<code>proxy/rewrite.go</code>)</li>
+      <li>Adds the <code>Authorization: Bearer</code> header to upstream requests</li>
+    </ul>
+    <p>Container env: <code>ANTHROPIC_VERTEX_BASE_URL=http://aiproxy:&lt;port&gt;</code>, <code>CLAUDE_CODE_SKIP_VERTEX_AUTH=1</code></p>
+    <p>Container gets <code>--add-host aiproxy:host-gateway</code> so it can reach the host proxy.</p>
+  </div>
+</details>
+
+<details>
+  <summary><span class="badge badge-pink">Auth</span> Gemini API key</summary>
+  <div class="inner">
+    <pre><span class="cm"># config.yaml</span>
+<span class="kw">ai_provider</span>: <span class="str">"gemini"</span>
+<span class="kw">gemini</span>:
+  <span class="kw">api_key</span>: <span class="str">"AIza..."</span>
+  <span class="kw">model</span>: <span class="str">"gemini-2.5-pro"</span></pre>
+    <p>Container env: <code>GEMINI_API_KEY=AIza...</code></p>
+    <p>Gemini CLI uses OpenAI-compatible chat/completions format.</p>
+  </div>
+</details>
+
+<!-- ============================================================ -->
+<h2 id="s7">7. Using a Locally Hosted Model</h2>
+
+<div class="info-box">
+  <div class="title">Local model = point the AI CLI at your own server</div>
+  <p>The bot itself never calls the AI API. It sets env vars, and the CLI inside the container reads them. So "use a local model" means: run a model server on your machine and tell the CLI to use it instead of the cloud.</p>
+</div>
+
+<details open>
+  <summary><span class="badge badge-blue">Option A</span> Ollama / vLLM with Anthropic-compatible API</summary>
+  <div class="inner">
+    <p>If your local server implements the Anthropic Messages API (<code>POST /v1/messages</code>):</p>
+    <pre><span class="cm"># Start your local model server</span>
+<span class="cm"># e.g., ollama with anthropic-compatible endpoint on port 11434</span>
+
+<span class="cm"># config.yaml</span>
+<span class="kw">ai_provider</span>: <span class="str">"claude"</span>
+<span class="kw">claude</span>:
+  <span class="kw">proxy_url</span>: <span class="str">"http://host.containers.internal:11434"</span>
+  <span class="kw">proxy_auth_token</span>: <span class="str">"dummy"</span>
+  <span class="kw">proxy_vertex_format</span>: <span class="val">false</span></pre>
+    <p>This sets <code>ANTHROPIC_BASE_URL=http://host.containers.internal:11434</code> inside the container. Claude Code CLI sends all requests there instead of <code>api.anthropic.com</code>.</p>
+    <p><strong>Requirement:</strong> Your server must implement streaming SSE responses in the Anthropic Messages API format.</p>
+
+    <div style="margin-top: 1rem; padding: .8rem; background: var(--surface); border-radius: 6px; border: 1px dashed var(--border);">
+      <strong style="color:var(--text); font-size:.85rem;">Network flow:</strong>
+      <pre style="border:none; padding:.4rem 0; margin:0;">Container (claude CLI)
+  &rarr; http://aiproxy:PORT  (URL translation proxy on host, if vertex_format)
+    &rarr; http://localhost:11434  (your local model server)
+
+OR (without vertex_format):
+
+Container (claude CLI)
+  &rarr; http://host.containers.internal:11434  (direct to local server)</pre>
+    </div>
+  </div>
+</details>
+
+<details>
+  <summary><span class="badge badge-green">Option B</span> OpenAI-compatible server (via Gemini path)</summary>
+  <div class="inner">
+    <p>If your local server implements the OpenAI chat completions API (<code>POST /v1/chat/completions</code>):</p>
+    <pre><span class="cm"># config.yaml</span>
+<span class="kw">ai_provider</span>: <span class="str">"gemini"</span>
+<span class="kw">gemini</span>:
+  <span class="kw">api_key</span>: <span class="str">"dummy"</span>
+  <span class="kw">model</span>: <span class="str">"your-local-model-name"</span></pre>
+    <p>The Gemini CLI reads <code>GEMINI_API_KEY</code> and uses the OpenAI-compatible format. You would need to also set the base URL inside the container image or via environment variable overrides.</p>
+    <p><strong>Caveat:</strong> The Gemini CLI may have specific expectations about response format that simpler servers don't satisfy. The Claude path (Option A) is more proven.</p>
+  </div>
+</details>
+
+<details>
+  <summary><span class="badge badge-purple">Option C</span> Fully custom provider</summary>
+  <div class="inner">
+    <p>Build your own container image with a CLI tool that:</p>
+    <ol style="margin:.4rem 0 0 1.2rem;">
+      <li>Reads <code>/workspace/.ai-session/task.md</code></li>
+      <li>Calls your local model API however you want</li>
+      <li>Edits files in <code>/workspace/</code></li>
+      <li>Exits with code 0 on success</li>
+    </ol>
+    <pre><span class="cm"># config.yaml</span>
+<span class="kw">ai_provider</span>: <span class="str">"my-tool"</span></pre>
+    <p>The bot's fallback command is: <code>my-tool -p "Read /workspace/.ai-session/task.md and complete the task described there."</code></p>
+    <p>This gives you total control. Any language, any model, any API.</p>
+  </div>
+</details>
+
+<!-- ============================================================ -->
+<h2 id="s8">8. Package Map</h2>
+
+<div class="row" style="flex-wrap: wrap; gap: .6rem;">
+  <div class="box" style="flex: 1 1 200px;">
+    <div class="label"><code>main.go</code></div>
+    <div class="desc">Entry point. Wires all services, starts scanners.</div>
+  </div>
+  <div class="box" style="flex: 1 1 200px;">
+    <div class="label"><code>models/</code></div>
+    <div class="desc">Config structs, Jira types, domain types (WorkItem, ProjectSettings).</div>
+  </div>
+  <div class="box" style="flex: 1 1 200px;">
+    <div class="label"><code>services/jira.go</code></div>
+    <div class="desc">Jira REST API client (search, transitions, comments).</div>
+  </div>
+  <div class="box" style="flex: 1 1 200px;">
+    <div class="label"><code>services/gitlab.go</code></div>
+    <div class="desc">GitLab API + git CLI operations (clone, push, MRs).</div>
+  </div>
+  <div class="box" style="flex: 1 1 200px;">
+    <div class="label"><code>services/hosting/</code></div>
+    <div class="desc">Router: dispatches VCS operations to GitHub or GitLab based on repo config.</div>
+  </div>
+  <div class="box" style="flex: 1 1 200px;">
+    <div class="label"><code>tracker/jira/</code></div>
+    <div class="desc">Adapts JiraService to the IssueTracker interface.</div>
+  </div>
+  <div class="box" style="flex: 1 1 200px;">
+    <div class="label"><code>scanner/</code></div>
+    <div class="desc">Polling loops: WorkItemScanner, FeedbackScanner, MergeScanner, CleanupScanner.</div>
+  </div>
+  <div class="box" style="flex: 1 1 200px;">
+    <div class="label"><code>jobmanager/</code></div>
+    <div class="desc">Coordinator: concurrency, retries, circuit breaker, cost tracking.</div>
+  </div>
+  <div class="box" style="flex: 1 1 200px;">
+    <div class="label"><code>executor/</code></div>
+    <div class="desc">Pipeline: new-ticket, feedback, and merge execution flows.</div>
+  </div>
+  <div class="box" style="flex: 1 1 200px;">
+    <div class="label"><code>workspace/</code></div>
+    <div class="desc">Per-ticket workspace lifecycle (clone, reuse, cleanup, TTL).</div>
+  </div>
+  <div class="box" style="flex: 1 1 200px;">
+    <div class="label"><code>container/</code></div>
+    <div class="desc">Runtime detection, image pulling, container start/exec/stop.</div>
+  </div>
+  <div class="box" style="flex: 1 1 200px;">
+    <div class="label"><code>taskfile/</code></div>
+    <div class="desc">Generates AI task files with instructions and workflow.</div>
+  </div>
+  <div class="box" style="flex: 1 1 200px;">
+    <div class="label"><code>proxy/</code></div>
+    <div class="desc">URL translation proxy for Models.corp (Vertex path rewriting).</div>
+  </div>
+  <div class="box" style="flex: 1 1 200px;">
+    <div class="label"><code>repoconfig/</code></div>
+    <div class="desc">Parses <code>.ai-bot/config.yaml</code> from target repos.</div>
+  </div>
+  <div class="box" style="flex: 1 1 200px;">
+    <div class="label"><code>projectresolver/</code></div>
+    <div class="desc">Maps ticket keys to project settings (component-to-repo).</div>
+  </div>
+  <div class="box" style="flex: 1 1 200px;">
+    <div class="label"><code>costtracker/</code></div>
+    <div class="desc">Daily AI cost tracking with budget enforcement.</div>
+  </div>
+  <div class="box" style="flex: 1 1 200px;">
+    <div class="label"><code>recovery/</code></div>
+    <div class="desc">Startup crash recovery: orphan containers, stuck tickets.</div>
+  </div>
+  <div class="box" style="flex: 1 1 200px;">
+    <div class="label"><code>commentfilter/</code></div>
+    <div class="desc">Bot-loop prevention (ignored users, known bots, thread depth).</div>
+  </div>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="s9">9. How the AI Edits Code</h2>
+
+<div class="info-box">
+  <div class="title">The AI CLI is itself an autonomous agent</div>
+  <p>Claude Code CLI and Gemini CLI are not simple prompt&rarr;response tools. They are <strong>agentic loops</strong> with built-in tools: Read files, Edit files, run Bash commands, search code, and more. The bot treats them as a black-box subprocess, but inside the container, the AI is autonomously navigating the codebase, running tests, and iterating on its solution.</p>
+</div>
+
+<h3>The exact CLI command</h3>
+
+<p style="margin-bottom: .5rem;">From <code>executor/script.go</code>, the bot constructs a bash script that runs inside the container:</p>
+
+<pre><span class="cm"># Claude provider</span>
+claude --dangerously-skip-permissions --output-format json --verbose \
+  -p <span class="str">"Read /workspace/.ai-session/task.md and complete the task described there."</span> \
+  &gt; /workspace/.ai-session/cli-output.json \
+  2&gt; &gt;(tee /workspace/.ai-session/session.log &gt;&amp;2)
+AI_EXIT=${PIPESTATUS[0]}
+printf '{"exit_code": %d}\n' "$AI_EXIT" &gt; /workspace/.ai-session/session-output.json
+exit ${AI_EXIT}
+
+<span class="cm"># Gemini provider</span>
+gemini -y --output-format json \
+  -p <span class="str">"Read /workspace/.ai-session/task.md and complete the task described there."</span> \
+  &gt; /workspace/.ai-session/cli-output.json \
+  2&gt; &gt;(tee /workspace/.ai-session/session.log &gt;&amp;2)
+<span class="cm"># ... same exit code handling</span></pre>
+
+<h3>What the AI CLI does internally</h3>
+
+<div style="display: grid; grid-template-columns: 40px 1fr; gap: .2rem .8rem; max-width: 900px; margin: .5rem auto;">
+
+  <div style="text-align:center; color:var(--accent); font-weight:700; font-size:.85rem; padding-top:.25rem;">1</div>
+  <div class="box" style="margin-bottom:.3rem;">
+    <div class="label">Reads the task file</div>
+    <div class="desc">The prompt says <em>"Read /workspace/.ai-session/task.md and complete the task"</em>. The CLI uses its <strong>Read</strong> tool to open this file and understand the assignment.</div>
+  </div>
+
+  <div style="text-align:center; color:var(--accent); font-weight:700; font-size:.85rem; padding-top:.25rem;">2</div>
+  <div class="box" style="margin-bottom:.3rem;">
+    <div class="label">Explores the codebase</div>
+    <div class="desc">Uses <strong>Bash</strong> (<code>find</code>, <code>grep</code>, <code>ls</code>), <strong>Read</strong>, and search tools to understand the project structure, locate relevant files, and read existing code.</div>
+  </div>
+
+  <div style="text-align:center; color:var(--accent); font-weight:700; font-size:.85rem; padding-top:.25rem;">3</div>
+  <div class="box" style="margin-bottom:.3rem;">
+    <div class="label">Edits files directly</div>
+    <div class="desc">Uses the <strong>Edit</strong> tool to make targeted changes to source files. Each edit specifies old content and new content &mdash; the CLI applies it like a surgical patch, not a full file rewrite.</div>
+  </div>
+
+  <div style="text-align:center; color:var(--accent); font-weight:700; font-size:.85rem; padding-top:.25rem;">4</div>
+  <div class="box" style="margin-bottom:.3rem;">
+    <div class="label">Runs build &amp; tests</div>
+    <div class="desc">Uses <strong>Bash</strong> to run <code>make build</code>, <code>go test</code>, <code>npm test</code>, or whatever the project uses. If tests fail, it reads the output, diagnoses the issue, and iterates.</div>
+  </div>
+
+  <div style="text-align:center; color:var(--accent); font-weight:700; font-size:.85rem; padding-top:.25rem;">5</div>
+  <div class="box" style="margin-bottom:.3rem;">
+    <div class="label">Iterates until done</div>
+    <div class="desc">The agentic loop continues: edit &rarr; test &rarr; read errors &rarr; fix &rarr; retest. The loop ends when the AI considers the task complete, or the context window fills up, or the container times out.</div>
+  </div>
+
+  <div style="text-align:center; color:var(--accent); font-weight:700; font-size:.85rem; padding-top:.25rem;">6</div>
+  <div class="box" style="margin-bottom:.3rem;">
+    <div class="label">Writes PR description (optional)</div>
+    <div class="desc">If the task file or workflow instructs it, the AI writes <code>.ai-session/pr.md</code> with a title and summary. The bot reads this file after the session ends.</div>
+  </div>
+</div>
+
+<h3>Available tools inside the CLI</h3>
+
+<div class="row" style="flex-wrap: wrap; gap: .5rem; margin-top: .5rem;">
+  <div class="box" style="flex: 1 1 180px;">
+    <div class="label" style="font-size:.85rem;"><span class="badge badge-blue">Tool</span> Read</div>
+    <div class="desc">Read any file in the workspace</div>
+  </div>
+  <div class="box" style="flex: 1 1 180px;">
+    <div class="label" style="font-size:.85rem;"><span class="badge badge-green">Tool</span> Edit</div>
+    <div class="desc">Surgical find-and-replace edits</div>
+  </div>
+  <div class="box" style="flex: 1 1 180px;">
+    <div class="label" style="font-size:.85rem;"><span class="badge badge-purple">Tool</span> Write</div>
+    <div class="desc">Create new files</div>
+  </div>
+  <div class="box" style="flex: 1 1 180px;">
+    <div class="label" style="font-size:.85rem;"><span class="badge badge-orange">Tool</span> Bash</div>
+    <div class="desc">Run shell commands (build, test, grep)</div>
+  </div>
+  <div class="box" style="flex: 1 1 180px;">
+    <div class="label" style="font-size:.85rem;"><span class="badge badge-pink">Tool</span> Search</div>
+    <div class="desc">Grep/find across the codebase</div>
+  </div>
+</div>
+
+<h3>What the task file looks like</h3>
+
+<p style="margin: .5rem 0;">Without any repo-level config files, the AI receives a <strong>minimal task file</strong>:</p>
+
+<div class="compare">
+  <div class="compare-col before">
+    <div class="compare-title">Without repo config (bare minimum)</div>
+    <pre style="font-size:.75rem; border: none; margin: 0;">
+# Task: CERTPX-17737
+
+## Summary
+GPUVendorDetector extensions
+
+The full ticket description is in
+`.ai-session/issue.md`.
+
+## Instructions
+Implement this task. Validate your
+changes compile and pass tests using
+whatever build tools this project
+provides. Fix any issues you find.
+Do not push to git -- the system
+handles that.
+
+<span class="cm">(That's it. No validation commands,
+ no workflow, no coding standards.
+ The AI has to figure everything out
+ from the repo itself.)</span></pre>
+  </div>
+  <div class="compare-col after">
+    <div class="compare-title">With repo config (guided)</div>
+    <pre style="font-size:.75rem; border: none; margin: 0;">
+# Task: CERTPX-17737
+
+## Summary
+GPUVendorDetector extensions
+
+The full ticket description is in
+`.ai-session/issue.md`.
+
+## Instructions
+Implement this task. Validate your
+changes compile and pass tests...
+Do not push to git.
+
+<span class="kw">## Project Instructions</span>
+After making changes, validate with:
+- `make build`
+- `make test`
+- `make lint`
+Follow existing code style.
+Add unit tests for all new functions.
+
+<span class="kw">## Workflow</span>
+Execute bugfix phases in order:
+1. Read .ai-workflows/bugfix/assess.md
+2. Read .ai-workflows/bugfix/diagnose.md
+3. Read .ai-workflows/bugfix/fix.md
+4. Read .ai-workflows/bugfix/test.md
+5. Read .ai-workflows/bugfix/review.md
+6. Write PR description to
+   .ai-session/pr.md</pre>
+  </div>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="s10">10. Improving Code Quality</h2>
+
+<div class="info-box">
+  <div class="title">Progressive enhancement &mdash; start simple, add layers as needed</div>
+  <p>Code quality from the AI is directly proportional to how much guidance you give it. Each level below adds a new configuration file to your target repository's <code>.ai-bot/</code> directory. You don't need all of them &mdash; even Level 1 alone is a massive improvement.</p>
+</div>
+
+<details open>
+  <summary><span class="level-badge level-1">1</span> <code>.ai-bot/instructions.md</code> &mdash; Universal instructions <span class="badge badge-green">Biggest impact</span></summary>
+  <div class="inner">
+    <p>This file is appended to <strong>every</strong> task file (both new tickets and PR feedback). It tells the AI how to validate its work and what coding standards to follow.</p>
+    <p><strong>Why it matters:</strong> Without this file, the AI has to guess how to build and test your project. It might run the wrong commands, miss linting rules, or skip validation entirely. With this file, the AI knows exactly what commands to run and what standards to follow.</p>
+
+    <h3>Example content</h3>
+    <pre>After making changes, validate with:
+- <span class="str">`make build`</span>    <span class="cm"># must compile cleanly</span>
+- <span class="str">`make test`</span>     <span class="cm"># all tests must pass</span>
+- <span class="str">`make lint`</span>     <span class="cm"># no linting errors</span>
+
+Follow the existing code style in the repository.
+Add unit tests for all new functions.
+Do not modify generated files (*.pb.go, *_generated.go).
+Keep commits atomic &mdash; one logical change per commit.
+
+When fixing bugs, write a regression test <span class="kw">first</span> that
+reproduces the failure, then implement the fix.</pre>
+
+    <p style="margin-top: .5rem;"><strong>Placement:</strong> <code>your-repo/.ai-bot/instructions.md</code></p>
+    <p><strong>Applies to:</strong> All task types (new tickets + feedback)</p>
+  </div>
+</details>
+
+<details>
+  <summary><span class="level-badge level-2">2</span> <code>.ai-bot/new-ticket-workflow.md</code> &mdash; Structured multi-phase workflow</summary>
+  <div class="inner">
+    <p>Guides the AI through a structured problem-solving process for new tickets. The AI follows explicit phases instead of ad-hoc coding.</p>
+    <p><strong>Why it matters:</strong> Without a workflow, the AI jumps straight to coding. With one, it assesses the problem, diagnoses root causes, implements a fix, tests it, and self-reviews &mdash; like a disciplined developer would.</p>
+
+    <h3>Example content</h3>
+    <pre>Execute the following bugfix workflow phases in order.
+Each phase is defined in the corresponding skill file.
+
+<span class="kw">1.</span> Read and execute <span class="str">.ai-workflows/bugfix/skills/assess.md</span>
+   The bug report is in .ai-session/task.md.
+   Do not ask clarifying questions.
+
+<span class="kw">2.</span> Read and execute <span class="str">.ai-workflows/bugfix/skills/diagnose.md</span>
+   Write root cause analysis to .ai-session/diagnosis.md.
+
+<span class="kw">3.</span> Read and execute <span class="str">.ai-workflows/bugfix/skills/fix.md</span>
+   Implement the minimal fix. Do not run tests yet.
+
+<span class="kw">4.</span> Read and execute <span class="str">.ai-workflows/bugfix/skills/test.md</span>
+   Write regression tests and run the full suite.
+   If tests fail, revise and retest (up to <span class="val">5</span> iterations).
+
+<span class="kw">5.</span> Read and execute <span class="str">.ai-workflows/bugfix/skills/review.md</span>
+   Self-review your changes. If issues found, correct them,
+   retest, and re-review (up to <span class="val">4</span> iterations).
+
+<span class="kw">6.</span> Write PR title and description to <span class="str">.ai-session/pr.md</span>.
+   Use the ## Title heading format. Include a Root Cause section.</pre>
+
+    <p style="margin-top: .5rem;"><strong>Placement:</strong> <code>your-repo/.ai-bot/new-ticket-workflow.md</code></p>
+    <p><strong>Applies to:</strong> New tickets only (not PR feedback)</p>
+    <p><strong>Requires:</strong> The <code>.ai-workflows/</code> skill files to be available. See Level 4 for importing them.</p>
+  </div>
+</details>
+
+<details>
+  <summary><span class="level-badge level-3">3</span> <code>.ai-bot/feedback-workflow.md</code> &mdash; PR feedback handling</summary>
+  <div class="inner">
+    <p>Structures how the AI handles PR review comments. The AI recovers context from the original session, makes targeted changes, and updates session artifacts.</p>
+    <p><strong>Why it matters:</strong> Without this, the AI treats each feedback round as a fresh problem. With it, the AI reads prior session context (diagnosis, implementation notes, test strategy) and makes coherent follow-up changes.</p>
+
+    <h3>Example content</h3>
+    <pre><span class="kw">1.</span> Read <span class="str">.ai-session/session-context.md</span> to recover prior decisions.
+<span class="kw">2.</span> Read <span class="str">.ai-session/diagnosis.md</span> and <span class="str">.ai-session/implementation-notes.md</span>.
+<span class="kw">3.</span> Address each review comment. For each:
+   - Understand the reviewer's concern
+   - Make the minimal change that addresses it
+   - Verify the change doesn't break existing tests
+<span class="kw">4.</span> Run validation commands (<span class="str">`make build`</span>, <span class="str">`make test`</span>).
+<span class="kw">5.</span> Update <span class="str">.ai-session/session-context.md</span> with a summary of this round.
+<span class="kw">6.</span> Write <span class="str">.ai-session/comment-responses.json</span>.</pre>
+
+    <p style="margin-top: .5rem;"><strong>Placement:</strong> <code>your-repo/.ai-bot/feedback-workflow.md</code></p>
+    <p><strong>Applies to:</strong> PR feedback only (not new tickets)</p>
+  </div>
+</details>
+
+<details>
+  <summary><span class="level-badge level-4">4</span> <code>.ai-bot/config.yaml</code> &mdash; Imports, validation, PR settings</summary>
+  <div class="inner">
+    <p>Bot-level configuration for the repository. Controls PR creation behavior, declares shared repos to import, and provides AI-readable validation commands.</p>
+    <p><strong>Why it matters:</strong> Imports let you share workflow skill files across many repositories. One central <code>ai-workflows</code> repo can serve all your projects.</p>
+
+    <h3>Example content</h3>
+    <pre><span class="cm"># Clone shared workflow skills into the workspace</span>
+<span class="kw">imports</span>:
+  - <span class="kw">repo</span>: <span class="str">https://github.com/your-org/ai-workflows</span>
+    <span class="kw">path</span>: <span class="str">.ai-workflows</span>
+    <span class="kw">ref</span>: <span class="str">main</span>
+    <span class="kw">install</span>: <span class="str">.ai-workflows/install.sh</span>
+
+<span class="cm"># Validation commands (hints for the AI)</span>
+<span class="kw">validation_commands</span>:
+  - make build
+  - make test
+  - make lint
+
+<span class="cm"># PR creation settings</span>
+<span class="kw">pr</span>:
+  <span class="kw">draft</span>: <span class="val">true</span>
+  <span class="kw">title_prefix</span>: <span class="str">"[AI]"</span>
+  <span class="kw">labels</span>:
+    - ai-generated
+    - needs-review
+
+<span class="cm"># AI tool restrictions</span>
+<span class="kw">ai</span>:
+  <span class="kw">claude</span>:
+    <span class="kw">allowed_tools</span>: <span class="str">"Bash Edit Read Write"</span></pre>
+
+    <p style="margin-top: .5rem;"><strong>Placement:</strong> <code>your-repo/.ai-bot/config.yaml</code></p>
+    <p><strong>Applies to:</strong> Bot behavior (imports run before AI, PR settings apply after)</p>
+  </div>
+</details>
+
+<details>
+  <summary><span class="level-badge level-5">5</span> <code>.ai-bot/container.json</code> &mdash; Custom container image</summary>
+  <div class="inner">
+    <p>Specify a custom container image with your exact toolchain pre-installed. Faster startup, deterministic environment, no "install during AI session" overhead.</p>
+    <p><strong>Why it matters:</strong> A generic <code>ubuntu:latest</code> image means the AI spends tokens installing Go, Python, Node, etc. A pre-built dev image means the AI starts coding immediately.</p>
+
+    <h3>Example content</h3>
+    <pre>{
+  <span class="str">"image"</span>: <span class="str">"your-org/dev-environment:latest"</span>,
+  <span class="str">"postCreateCommand"</span>: <span class="str">"make setup"</span>,
+  <span class="str">"env"</span>: {
+    <span class="str">"GOPATH"</span>: <span class="str">"/go"</span>,
+    <span class="str">"LANG"</span>: <span class="str">"en_US.UTF-8"</span>
+  },
+  <span class="str">"resourceLimits"</span>: {
+    <span class="str">"memory"</span>: <span class="str">"16g"</span>,
+    <span class="str">"cpus"</span>: <span class="str">"4"</span>
+  }
+}</pre>
+
+    <p style="margin-top: .5rem;"><strong>Placement:</strong> <code>your-repo/.ai-bot/container.json</code></p>
+    <p><strong>Alternative:</strong> <code>.devcontainer/devcontainer.json</code> (standard format, subset supported)</p>
+  </div>
+</details>
+
+<h3>File placement in your target repo</h3>
+
+<div class="file-tree">
+<span class="dir">your-repo/</span>
+├── <span class="dir">.ai-bot/</span>                           <span class="note">&larr; all config lives here</span>
+│   ├── <span class="file">instructions.md</span>               <span class="note">&larr; Level 1: validation commands, coding standards</span>
+│   ├── <span class="file">new-ticket-workflow.md</span>        <span class="note">&larr; Level 2: multi-phase workflow for new tickets</span>
+│   ├── <span class="file">feedback-workflow.md</span>          <span class="note">&larr; Level 3: structured feedback handling</span>
+│   ├── <span class="file">config.yaml</span>                   <span class="note">&larr; Level 4: imports, PR settings, validation hints</span>
+│   └── <span class="file">container.json</span>                <span class="note">&larr; Level 5: custom container image</span>
+├── <span class="dir">.ai-session/</span>                        <span class="note">&larr; runtime files (bot writes, AI reads/writes)</span>
+│   ├── <span class="file">task.md</span>                       <span class="note">&larr; generated by bot each run</span>
+│   ├── <span class="file">issue.md</span>                      <span class="note">&larr; Jira ticket content</span>
+│   ├── <span class="file">pr.md</span>                         <span class="note">&larr; AI writes PR title/description</span>
+│   ├── <span class="file">session-context.md</span>            <span class="note">&larr; AI decision log (persists across sessions)</span>
+│   └── <span class="file">cli-output.json</span>               <span class="note">&larr; raw CLI output for cost tracking</span>
+├── <span class="dir">.ai-workflows/</span>                      <span class="note">&larr; imported via config.yaml (not committed here)</span>
+│   └── <span class="dir">bugfix/skills/</span>
+│       ├── <span class="file">assess.md</span>
+│       ├── <span class="file">diagnose.md</span>
+│       ├── <span class="file">fix.md</span>
+│       ├── <span class="file">test.md</span>
+│       └── <span class="file">review.md</span>
+├── <span class="file">Makefile</span>
+├── <span class="file">go.mod</span>
+└── <span class="file">src/...</span>
+</div>
+
+<h3>What the AI sees: before vs after</h3>
+
+<div class="compare">
+  <div class="compare-col before">
+    <div class="compare-title">No repo config (default)</div>
+    <p style="font-size:.8rem; color: var(--text-muted);">The AI receives only the standard instructions. It must discover build tools, test commands, and coding conventions from the repository itself. Results are unpredictable.</p>
+    <ul style="font-size:.8rem; margin-top:.4rem;">
+      <li>May run wrong build commands</li>
+      <li>May skip tests entirely</li>
+      <li>No structured problem-solving</li>
+      <li>No self-review phase</li>
+      <li>Generic PR descriptions</li>
+      <li>No session continuity for feedback</li>
+    </ul>
+  </div>
+  <div class="compare-col after">
+    <div class="compare-title">With repo config (Levels 1-4)</div>
+    <p style="font-size:.8rem; color: var(--text-muted);">The AI receives specific validation commands, a structured workflow, and shared skill files. Results are consistent and high-quality.</p>
+    <ul style="font-size:.8rem; margin-top:.4rem;">
+      <li>Runs exact build/test/lint commands</li>
+      <li>Follows multi-phase workflow</li>
+      <li>Writes diagnosis before fixing</li>
+      <li>Self-reviews with iteration caps</li>
+      <li>Generates structured PR descriptions</li>
+      <li>Maintains session context across rounds</li>
+    </ul>
+  </div>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="s11">11. Using a Local Model (Detailed Setup)</h2>
+
+<div class="info-box">
+  <div class="title">Replace the cloud AI with your own model server</div>
+  <p>The bot never calls the AI API directly &mdash; it sets environment variables, and the CLI inside the container reads them. "Use a local model" means: run a model server on your machine and tell the CLI to connect there instead of the cloud. The key constraint is API compatibility &mdash; the CLI expects a specific request/response format.</p>
+</div>
+
+<details open>
+  <summary><span class="badge badge-blue">Option A</span> Anthropic Messages API server (Ollama, vLLM, LiteLLM)</summary>
+  <div class="inner">
+    <p>If your local server implements the <strong>Anthropic Messages API</strong> (<code>POST /v1/messages</code> with streaming SSE), Claude Code CLI can talk to it natively.</p>
+
+    <h3>1. Start the model server</h3>
+    <pre><span class="cm"># Example with Ollama (requires anthropic-compatible mode)</span>
+ollama serve
+
+<span class="cm"># Example with vLLM</span>
+vllm serve your-model-name --api-format anthropic --port 8000
+
+<span class="cm"># Example with LiteLLM proxy</span>
+litellm --model ollama/llama3.1 --port 4000</pre>
+
+    <h3>2. Configure the bot</h3>
+    <pre><span class="cm"># config.yaml</span>
+<span class="kw">ai_provider</span>: <span class="str">"claude"</span>
+
+<span class="kw">claude</span>:
+  <span class="kw">proxy_url</span>: <span class="str">"http://host.containers.internal:8000"</span>
+  <span class="kw">proxy_auth_token</span>: <span class="str">"dummy"</span>      <span class="cm"># required by config validation, but not sent to local server</span>
+  <span class="kw">proxy_vertex_format</span>: <span class="val">false</span>    <span class="cm"># direct connection, no URL rewriting</span></pre>
+
+    <p>This sets <code>ANTHROPIC_BASE_URL=http://host.containers.internal:8000</code> inside the container. The Claude Code CLI sends all requests there instead of <code>api.anthropic.com</code>.</p>
+
+    <h3>3. Network flow</h3>
+    <div class="net-flow">
+<span class="host">Container</span> (Claude Code CLI)
+  <span class="arrow">&rarr;</span> http://<span class="port">host.containers.internal:8000</span>   <span class="comment"># podman host resolution</span>
+    <span class="arrow">&rarr;</span> <span class="host">Your Machine</span> (model server listening on <span class="port">:8000</span>)
+      <span class="arrow">&rarr;</span> <span class="host">GPU</span> (local inference)
+    </div>
+
+    <div class="alert" style="background: rgba(210,153,34,.08); border-color: rgba(210,153,34,.3);">
+      <div class="title" style="color: var(--yellow);">Requirements</div>
+      <ul style="margin-top: .3rem;">
+        <li>Server must support <strong>streaming SSE</strong> responses in Anthropic Messages API format</li>
+        <li>Server must handle the <code>model</code> field in requests (map it to your local model)</li>
+        <li><code>host.containers.internal</code> resolves to the host machine from inside podman containers</li>
+        <li>For Docker, use <code>host.docker.internal</code> instead</li>
+      </ul>
+    </div>
+  </div>
+</details>
+
+<details>
+  <summary><span class="badge badge-green">Option B</span> OpenAI-compatible server (via Gemini path)</summary>
+  <div class="inner">
+    <p>If your local server implements the <strong>OpenAI Chat Completions API</strong> (<code>POST /v1/chat/completions</code>), you can use the Gemini provider path.</p>
+
+    <h3>1. Start the model server</h3>
+    <pre><span class="cm"># Example with Ollama (OpenAI-compatible by default)</span>
+ollama serve   <span class="cm"># listens on :11434, serves /v1/chat/completions</span>
+
+<span class="cm"># Example with vLLM</span>
+vllm serve your-model --port 8000   <span class="cm"># OpenAI-compatible by default</span>
+
+<span class="cm"># Example with llama.cpp server</span>
+./llama-server -m model.gguf --port 8080</pre>
+
+    <h3>2. Configure the bot</h3>
+    <pre><span class="cm"># config.yaml</span>
+<span class="kw">ai_provider</span>: <span class="str">"gemini"</span>
+
+<span class="kw">gemini</span>:
+  <span class="kw">api_key</span>: <span class="str">"dummy"</span>               <span class="cm"># required but ignored by local server</span>
+  <span class="kw">model</span>: <span class="str">"your-local-model-name"</span></pre>
+
+    <p>The Gemini CLI reads <code>GEMINI_API_KEY</code> and sends requests in OpenAI-compatible format. You may need to configure the base URL via the container image or environment variable overrides.</p>
+
+    <h3>3. Network flow</h3>
+    <div class="net-flow">
+<span class="host">Container</span> (Gemini CLI)
+  <span class="arrow">&rarr;</span> http://<span class="port">host.containers.internal:11434</span>/v1/chat/completions
+    <span class="arrow">&rarr;</span> <span class="host">Your Machine</span> (Ollama / vLLM / llama.cpp)
+      <span class="arrow">&rarr;</span> <span class="host">GPU</span> (local inference)
+    </div>
+
+    <div class="alert" style="background: rgba(210,153,34,.08); border-color: rgba(210,153,34,.3);">
+      <div class="title" style="color: var(--yellow);">Caveat</div>
+      <p>The Gemini CLI may have specific expectations about response format (tool use, function calling) that simpler servers don't fully support. Option A (Claude path) is more battle-tested for agentic use cases.</p>
+    </div>
+  </div>
+</details>
+
+<details>
+  <summary><span class="badge badge-purple">Option C</span> Fully custom CLI provider</summary>
+  <div class="inner">
+    <p>Build your own container image with a CLI tool that replaces both Claude Code and Gemini CLI entirely. Full control over the AI integration.</p>
+
+    <h3>1. Build your CLI tool</h3>
+    <p>Your tool must:</p>
+    <ol style="margin: .4rem 0 .8rem 1.2rem;">
+      <li>Accept <code>-p "prompt text"</code> as a command-line argument</li>
+      <li>Read <code>/workspace/.ai-session/task.md</code> from the prompt</li>
+      <li>Call your local model API however you want</li>
+      <li>Edit files in <code>/workspace/</code></li>
+      <li>Optionally write <code>/workspace/.ai-session/pr.md</code></li>
+      <li>Exit with code 0 on success, non-zero on failure</li>
+    </ol>
+
+    <h3>2. Configure the bot</h3>
+    <pre><span class="cm"># config.yaml</span>
+<span class="kw">ai_provider</span>: <span class="str">"my-tool"</span>
+
+<span class="cm"># Container image that has your CLI installed</span>
+<span class="kw">container</span>:
+  <span class="kw">default_image</span>: <span class="str">"your-org/ai-worker:latest"</span></pre>
+
+    <p>The bot's fallback command is:<br>
+    <code>my-tool -p "Read /workspace/.ai-session/task.md and complete the task described there."</code></p>
+
+    <h3>3. Network flow</h3>
+    <div class="net-flow">
+<span class="host">Container</span> (your custom CLI: <span class="port">my-tool</span>)
+  <span class="arrow">&rarr;</span> <span class="comment">whatever your tool does internally</span>
+    <span class="arrow">&rarr;</span> http://<span class="port">host.containers.internal:PORT</span>  <span class="comment"># your model server</span>
+    <span class="arrow">&rarr;</span> <span class="host">GPU</span> or <span class="host">CPU</span> (inference)
+    </div>
+
+    <p style="margin-top: .5rem;">This gives you <strong>total control</strong>. Any language, any model, any API. The bot doesn't care what happens inside the container as long as files are edited and the process exits cleanly.</p>
+  </div>
+</details>
+
+<h3>Host resolution from containers</h3>
+
+<div class="box" style="border-color: var(--accent4);">
+  <div class="label"><span class="badge badge-orange">Networking</span> How the container reaches your host machine</div>
+  <div class="desc">
+    <p>Containers run in an isolated network. To reach a server on the host machine, use these special hostnames:</p>
+  </div>
+  <div style="margin-top: .5rem;">
+    <div class="row">
+      <div class="box" style="flex: 1;">
+        <div class="label" style="font-size:.85rem;">Podman</div>
+        <div class="desc"><code>host.containers.internal</code><br>Resolves automatically in rootless podman. For rootful podman, add <code>--network=slirp4netns</code>.</div>
+      </div>
+      <div class="box" style="flex: 1;">
+        <div class="label" style="font-size:.85rem;">Docker</div>
+        <div class="desc"><code>host.docker.internal</code><br>Works on Docker Desktop (macOS/Windows). On Linux Docker, add <code>--add-host=host.docker.internal:host-gateway</code>.</div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ============================================================ -->
+<div class="footer">
+  Generated from codebase analysis &mdash; jira-ai-issue-solver architecture reference
+</div>
+
+</body>
+</html>
