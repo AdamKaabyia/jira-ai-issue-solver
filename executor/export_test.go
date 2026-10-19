@@ -49,19 +49,14 @@ func BuildPRContent(workItem *models.WorkItem, ticketKey, titlePrefix string, ai
 // ContainerCredsMountTarget exposes the mount path constant for tests.
 const ContainerCredsMountTarget = containerCredsMountTarget
 
-// SetFailureLabel exposes setFailureLabel for testing.
-func SetFailureLabel(p *Pipeline, logger *zap.Logger, ticketKey string, fl models.FailureLabels, targetLabel string) {
-	p.setFailureLabel(logger, ticketKey, fl, targetLabel)
+// SetPipelineLabel exposes setPipelineLabel for testing.
+func SetPipelineLabel(p *Pipeline, logger *zap.Logger, ticketKey string, allLabels []string, targetLabel string) {
+	p.setPipelineLabel(logger, ticketKey, allLabels, targetLabel)
 }
 
 // ClearFailureLabels exposes clearFailureLabels for testing.
 func ClearFailureLabels(p *Pipeline, logger *zap.Logger, ticketKey string, fl models.FailureLabels) {
 	p.clearFailureLabels(logger, ticketKey, fl)
-}
-
-// SetLifecycleLabel exposes setLifecycleLabel for testing.
-func SetLifecycleLabel(p *Pipeline, logger *zap.Logger, ticketKey string, ll models.LifecycleLabels, targetLabel string) {
-	p.setLifecycleLabel(logger, ticketKey, ll, targetLabel)
 }
 
 // ValidateForkMode exposes validateForkMode for testing.
@@ -87,6 +82,11 @@ func SetPRValidationLabel(p *Pipeline, logger *zap.Logger, owner, repo string, p
 // ClearPRValidationLabels exposes clearPRValidationLabels for testing.
 func ClearPRValidationLabels(p *Pipeline, logger *zap.Logger, owner, repo string, prNumber int, vl models.PRValidationLabels) {
 	p.clearPRValidationLabels(logger, owner, repo, prNumber, vl)
+}
+
+// ApplyCostCapPRLabel exposes applyCostCapPRLabel for testing.
+func ApplyCostCapPRLabel(p *Pipeline, logger *zap.Logger, ticketKey string, settings *models.ProjectSettings, exceeded bool) {
+	p.applyCostCapPRLabel(logger, ticketKey, settings, exceeded)
 }
 
 // TicketCostPath exposes the ticket cost file path constant for tests.

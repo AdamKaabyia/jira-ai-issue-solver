@@ -391,11 +391,11 @@ func (s *costCommentGitStub) ListIssueComments(owner, repo string, prNumber int)
 	return []models.IssueComment{}, nil
 }
 
-func (s *costCommentGitStub) PostIssueComment(owner, repo string, prNumber int, body string) error {
+func (s *costCommentGitStub) PostIssueComment(owner, repo string, prNumber int, body string) (int64, error) {
 	if s.postFunc != nil {
-		return s.postFunc(owner, repo, prNumber, body)
+		return 0, s.postFunc(owner, repo, prNumber, body)
 	}
-	return nil
+	return 0, nil
 }
 
 func TestPostCostCrossReference_PostsOnSecondaryPRs(t *testing.T) {

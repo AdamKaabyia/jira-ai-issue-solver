@@ -65,6 +65,20 @@ type Event struct {
 	// and the local workspace before processing. Set when the retry
 	// label triggers resubmission of an exhausted ticket.
 	CleanRetry bool
+
+	// CommandSource identifies the PR comment that triggered a bot
+	// command. Nil for events not triggered by a bot command.
+	CommandSource *CommandSource
+}
+
+// CommandSource identifies the GitHub PR comment that triggered a bot
+// command, enabling the executor to post a reply and update it on
+// completion.
+type CommandSource struct {
+	Owner     string
+	Repo      string
+	PRNumber  int
+	CommentID int64
 }
 
 // JobResult holds the outcome of a completed job.
@@ -87,6 +101,10 @@ type JobResult struct {
 	// successfully: validation was not explicitly failed and the
 	// container exited with code zero.
 	ValidationPassed bool
+
+	// MergeCommitSHA is the commit SHA from a merge operation.
+	// Only set for merge jobs that produced a commit.
+	MergeCommitSHA string
 }
 
 // Job represents a unit of work tracked by the Manager. Jobs progress
@@ -128,6 +146,10 @@ type Job struct {
 	// CleanRetry signals the pipeline to delete stale remote branches
 	// and the local workspace before processing.
 	CleanRetry bool
+
+	// CommandSource identifies the PR comment that triggered a bot
+	// command. Nil for jobs not triggered by a bot command.
+	CommandSource *CommandSource
 }
 
 // CostRecorder tracks AI session costs for budget enforcement. The

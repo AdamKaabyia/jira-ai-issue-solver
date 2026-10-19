@@ -2985,9 +2985,9 @@ func TestFeedbackPipeline_ErrNoChanges_FinalAttempt_PostsUnableToAddress(t *test
 	}
 
 	var issueCommentBodies []string
-	d.git.PostIssueCommentFunc = func(owner, repo string, prNumber int, body string) error {
+	d.git.PostIssueCommentFunc = func(owner, repo string, prNumber int, body string) (int64, error) {
 		issueCommentBodies = append(issueCommentBodies, body)
-		return nil
+		return 0, nil
 	}
 
 	p := d.pipelineWithConfig(t, executor.Config{

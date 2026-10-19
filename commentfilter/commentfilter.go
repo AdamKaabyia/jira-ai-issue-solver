@@ -90,12 +90,12 @@ func Filter(comments []models.PRComment, cfg Config) []models.PRComment {
 	}
 
 	byID := buildLookup(comments)
-	normBot := normalizeUsername(cfg.BotUsername)
+	normBot := NormalizeUsername(cfg.BotUsername)
 	ignoreRe := botIgnoreDirectiveRe(normBot)
 
 	result := make([]models.PRComment, 0, len(comments))
 	for _, c := range comments {
-		norm := normalizeUsername(c.Author.Username)
+		norm := NormalizeUsername(c.Author.Username)
 
 		// Keep bot's own comments (needed for address detection).
 		if norm == normBot {
@@ -138,11 +138,11 @@ func Filter(comments []models.PRComment, cfg Config) []models.PRComment {
 // already replied to.
 func HasNewActionable(comments []models.PRComment, cfg Config) bool {
 	filtered := Filter(comments, cfg)
-	normBot := normalizeUsername(cfg.BotUsername)
+	normBot := NormalizeUsername(cfg.BotUsername)
 	botRepliedTo := BotRepliedTo(filtered, normBot)
 
 	for _, c := range filtered {
-		if normalizeUsername(c.Author.Username) == normBot {
+		if NormalizeUsername(c.Author.Username) == normBot {
 			continue
 		}
 		if !botRepliedTo[c.ID] {
@@ -169,7 +169,7 @@ func BotRepliedTo(comments []models.PRComment, normBot string) map[int64]bool {
 	threadBotLatest := make(map[int64]time.Time)
 
 	for _, c := range comments {
-		if normalizeUsername(c.Author.Username) != normBot {
+		if NormalizeUsername(c.Author.Username) != normBot {
 			continue
 		}
 		// Review comment reply: threaded via InReplyTo.
@@ -188,7 +188,7 @@ func BotRepliedTo(comments []models.PRComment, normBot string) map[int64]bool {
 	// Second pass: in flat review threads, mark non-bot follow-up
 	// comments as replied-to when the bot replied at or after them.
 	for _, c := range comments {
-		if normalizeUsername(c.Author.Username) == normBot {
+		if NormalizeUsername(c.Author.Username) == normBot {
 			continue
 		}
 		if c.IsReviewComment && c.InReplyTo != 0 {
@@ -201,9 +201,9 @@ func BotRepliedTo(comments []models.PRComment, normBot string) map[int64]bool {
 	return replied
 }
 
-// normalizeUsername strips the GitHub [bot] suffix and lowercases
+// NormalizeUsername strips the GitHub [bot] suffix and lowercases
 // for case-insensitive comparison.
-func normalizeUsername(s string) string {
+func NormalizeUsername(s string) string {
 	return strings.ToLower(strings.TrimSuffix(s, "[bot]"))
 }
 
@@ -217,7 +217,7 @@ func buildLookup(comments []models.PRComment) map[int64]models.PRComment {
 
 func isIgnored(normUsername string, ignored []string) bool {
 	for _, u := range ignored {
-		if normalizeUsername(u) == normUsername {
+		if NormalizeUsername(u) == normUsername {
 			return true
 		}
 	}
@@ -226,7 +226,7 @@ func isIgnored(normUsername string, ignored []string) bool {
 
 func isKnownBot(normUsername string, knownBots []string) bool {
 	for _, b := range knownBots {
-		if normalizeUsername(b) == normUsername {
+		if NormalizeUsername(b) == normUsername {
 			return true
 		}
 	}
@@ -261,6 +261,24 @@ func botIgnoreDirectiveRe(normBot string) *regexp.Regexp {
 	return regexp.MustCompile(pattern)
 }
 
+// BotCommandRe builds a compiled regexp matching @<botUsername> <command>.
+// The structure mirrors [botIgnoreDirectiveRe]: case-insensitive,
+// optional [bot] suffix, horizontal whitespace only, word boundary.
+// Callers that check multiple comments should compile once and reuse.
+func BotCommandRe(botUsername, command string) *regexp.Regexp {
+	normBot := NormalizeUsername(botUsername)
+	pattern := `(?i)(^|[^[:alnum:]_])@` + regexp.QuoteMeta(normBot) + `(\[bot\])?[ \t]+` + regexp.QuoteMeta(command) + `\b`
+	return regexp.MustCompile(pattern)
+}
+
+// IsSyncCommand reports whether body contains an @<botUsername> sync
+// directive. The match is case-insensitive and accepts an optional
+// [bot] suffix on the username. Recompiles the regex on each call;
+// for checking multiple bodies, use [BotCommandRe] once and reuse.
+func IsSyncCommand(body, botUsername string) bool {
+	return BotCommandRe(botUsername, "sync").MatchString(body)
+}
+
 // shouldSkipBotReply returns true if a known bot is replying to our
 // bot's comment, or if the parent comment is missing (defensive
 // skip — the parent may have been our bot's comment).
@@ -269,7 +287,7 @@ func shouldSkipBotReply(c models.PRComment, byID map[int64]models.PRComment, nor
 	if !found {
 		return true
 	}
-	return normalizeUsername(parent.Author.Username) == normBot
+	return NormalizeUsername(parent.Author.Username) == normBot
 }
 
 // threadDepth counts how many times our bot appears in a comment's
@@ -301,7 +319,7 @@ func reviewThreadBotCount(c models.PRComment, normBot string, byID map[int64]mod
 
 	count := 0
 	for _, sibling := range byID {
-		if normalizeUsername(sibling.Author.Username) == normBot && sibling.InReplyTo == c.InReplyTo {
+		if NormalizeUsername(sibling.Author.Username) == normBot && sibling.InReplyTo == c.InReplyTo {
 			count++
 		}
 	}
@@ -327,7 +345,7 @@ func parentChainBotCount(commentID int64, normBot string, byID map[int64]models.
 			break
 		}
 
-		if normalizeUsername(c.Author.Username) == normBot {
+		if NormalizeUsername(c.Author.Username) == normBot {
 			depth++
 		}
 

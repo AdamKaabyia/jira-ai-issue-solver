@@ -29,6 +29,7 @@ var (
 	_ scanner.RetryResetter          = (*StubRetryResetter)(nil)
 	_ scanner.MergeabilityChecker    = (*StubMergeabilityChecker)(nil)
 	_ scanner.PRLabeler              = (*StubPRLabeler)(nil)
+	_ scanner.TriageLabelResolver    = (*StubTriageLabelResolver)(nil)
 )
 
 // StubScanner is a test double for [scanner.Scanner].
@@ -330,4 +331,16 @@ func (s *StubPRLabeler) LastLabelRemoval(owner, repo string, number int, label s
 		return s.LastLabelRemovalFunc(owner, repo, number, label)
 	}
 	return time.Time{}, nil
+}
+
+// StubTriageLabelResolver is a test double for [scanner.TriageLabelResolver].
+type StubTriageLabelResolver struct {
+	ResolveTriageLabelsFunc func(item models.WorkItem) models.TriageLabels
+}
+
+func (s *StubTriageLabelResolver) ResolveTriageLabels(item models.WorkItem) models.TriageLabels {
+	if s.ResolveTriageLabelsFunc != nil {
+		return s.ResolveTriageLabelsFunc(item)
+	}
+	return models.TriageLabels{}
 }

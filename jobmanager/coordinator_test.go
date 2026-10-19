@@ -135,6 +135,54 @@ func TestSubmit_CleanRetryDefaultFalse(t *testing.T) {
 	}
 }
 
+func TestSubmit_CommandSourcePropagated(t *testing.T) {
+	coord := mustCoordinator(t, jobmanager.Config{
+		MaxConcurrent: 1,
+		MaxRetries:    -1,
+	}, blockForever)
+	defer coord.Shutdown()
+
+	src := &jobmanager.CommandSource{
+		Owner:     "org",
+		Repo:      "repo",
+		PRNumber:  42,
+		CommentID: 99,
+	}
+	job, err := coord.Submit(jobmanager.Event{
+		Type:          jobmanager.JobTypeMerge,
+		TicketKey:     "PROJ-1",
+		CommandSource: src,
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if job.CommandSource == nil {
+		t.Fatal("expected CommandSource to be propagated")
+	}
+	if job.CommandSource.CommentID != 99 {
+		t.Errorf("got CommentID %d, want 99", job.CommandSource.CommentID)
+	}
+}
+
+func TestSubmit_CommandSourceNilByDefault(t *testing.T) {
+	coord := mustCoordinator(t, jobmanager.Config{
+		MaxConcurrent: 1,
+		MaxRetries:    -1,
+	}, blockForever)
+	defer coord.Shutdown()
+
+	job, err := coord.Submit(jobmanager.Event{
+		Type:      jobmanager.JobTypeMerge,
+		TicketKey: "PROJ-1",
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if job.CommandSource != nil {
+		t.Error("expected CommandSource to be nil by default")
+	}
+}
+
 func TestSubmit_RejectsEmptyTicketKey(t *testing.T) {
 	coord := mustCoordinator(t, jobmanager.Config{
 		MaxConcurrent: 1,

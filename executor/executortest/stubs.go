@@ -50,7 +50,7 @@ type StubGitService struct {
 	GetPRForBranchFunc          func(owner, repo, head string) (*models.PRDetails, error)
 	GetPRCommentsFunc           func(owner, repo string, number int, since time.Time) ([]models.PRComment, error)
 	ReplyToCommentFunc          func(owner, repo string, prNumber int, commentID int64, body string) error
-	PostIssueCommentFunc        func(owner, repo string, prNumber int, body string) error
+	PostIssueCommentFunc        func(owner, repo string, prNumber int, body string) (int64, error)
 	ListIssueCommentsFunc       func(owner, repo string, prNumber int) ([]models.IssueComment, error)
 	UpdateIssueCommentFunc      func(owner, repo string, commentID int64, body string) error
 	MergeBaseFunc               func(dir, branch, fetchURL string) ([]string, error)
@@ -169,11 +169,11 @@ func (s *StubGitService) ReplyToComment(owner, repo string, prNumber int, commen
 	return nil
 }
 
-func (s *StubGitService) PostIssueComment(owner, repo string, prNumber int, body string) error {
+func (s *StubGitService) PostIssueComment(owner, repo string, prNumber int, body string) (int64, error) {
 	if s.PostIssueCommentFunc != nil {
 		return s.PostIssueCommentFunc(owner, repo, prNumber, body)
 	}
-	return nil
+	return 0, nil
 }
 
 func (s *StubGitService) ListIssueComments(owner, repo string, prNumber int) ([]models.IssueComment, error) {

@@ -8,6 +8,7 @@ import (
 
 	"go.uber.org/zap"
 
+	"jira-ai-issue-solver/commentfilter"
 	"jira-ai-issue-solver/container"
 	"jira-ai-issue-solver/jobmanager"
 	"jira-ai-issue-solver/models"
@@ -29,18 +30,38 @@ func (p *Pipeline) executeMerge(ctx context.Context, job *jobmanager.Job) (resul
 	// --- Step 1: Fetch work item ---
 	workItem, err := p.tracker.GetWorkItem(job.TicketKey)
 	if err != nil {
+		p.postPreflightFailureReply(logger, job, err)
 		return result, fmt.Errorf("get work item: %w", err)
 	}
 
 	// --- Step 2: Resolve project settings ---
 	settings, err := p.projects.ResolveProject(*workItem)
 	if err != nil {
+		p.postPreflightFailureReply(logger, job, err)
 		return result, fmt.Errorf("resolve project: %w", err)
+	}
+
+	// Post sync command reply before dispatching to single/multi
+	// repo. The reply is edited with the outcome in a defer.
+	var mergeReplyID int64
+	branchName := fmt.Sprintf("%s/%s", p.cfg.BotUsername, job.TicketKey)
+	baseBranch := p.commandSourceBaseBranch(job.CommandSource, settings)
+	if job.CommandSource != nil {
+		mergeReplyID = p.postMergeCommandReply(
+			logger, job.CommandSource, job.CommandSource.CommentID,
+			baseBranch, branchName)
 	}
 
 	defer func() {
 		if retErr != nil {
 			p.handleMergeFailure(logger, job.TicketKey, settings, retErr)
+		}
+		if job.CommandSource != nil {
+			p.updateMergeCommandReply(
+				logger, job.CommandSource, mergeReplyID,
+				job.CommandSource.CommentID,
+				baseBranch, branchName,
+				result.MergeCommitSHA, retErr)
 		}
 	}()
 
@@ -219,7 +240,7 @@ func (p *Pipeline) executeSingleRepoMerge(
 	// --- Step 13: Commit via GitHub API ---
 	importExcludes := collectExcludes(mergedImports)
 	commitMsg := fmt.Sprintf("%s: resolve merge conflicts with %s", job.TicketKey, repo.BaseBranch)
-	_, err = p.git.CommitChanges(
+	result.MergeCommitSHA, err = p.git.CommitChanges(
 		repo.Owner, settings.CommitOwner(), repo.Repo, branchName,
 		commitMsg, wsPath, repo.BaseBranch, workItem.Assignee, importExcludes, skipFileGuardrail,
 	)
@@ -271,7 +292,7 @@ func (p *Pipeline) commitCleanMerge(
 	}
 
 	commitMsg := fmt.Sprintf("%s: merge %s into %s", job.TicketKey, repo.BaseBranch, branchName)
-	_, err = p.git.CommitChanges(
+	result.MergeCommitSHA, err = p.git.CommitChanges(
 		repo.Owner, settings.CommitOwner(), repo.Repo, branchName,
 		commitMsg, wsPath, repo.BaseBranch, workItem.Assignee, nil, skipFileGuardrail,
 	)
@@ -522,13 +543,14 @@ func (p *Pipeline) runMultiRepoMergeAI(
 	}
 
 	importExcludes := collectExcludes(mergedImports)
-	committed, err := p.commitMultiRepoMergeResolution(logger, job, workItem, settings, wsPath, branchName, repoInfos, importExcludes)
+	committed, sha, err := p.commitMultiRepoMergeResolution(logger, job, workItem, settings, wsPath, branchName, repoInfos, importExcludes)
 	if err != nil {
 		return ctr, result, err
 	}
 	if !committed {
 		return ctr, result, fmt.Errorf("AI produced no committable changes resolving merge conflicts (exit code: %d)", exitCode)
 	}
+	result.MergeCommitSHA = sha
 
 	p.postOrUpdateCostComment(logger,
 		repoInfos[0].repo.Owner, repoInfos[0].repo.Repo,
@@ -580,20 +602,21 @@ func (p *Pipeline) commitMultiRepoMergeResolution(
 	wsPath, branchName string,
 	repoInfos []mergeRepoPR,
 	importExcludes []string,
-) (bool, error) {
+) (bool, string, error) {
 	committed := false
+	var lastSHA string
 	for _, ri := range repoInfos {
 		repoDir := filepath.Join(wsPath, ri.repo.Name)
 		has, err := p.git.HasChanges(repoDir, ri.repo.BaseBranch)
 		if err != nil {
-			return false, fmt.Errorf("check changes for %s: %w", ri.repo.Name, err)
+			return false, "", fmt.Errorf("check changes for %s: %w", ri.repo.Name, err)
 		}
 		if !has {
 			continue
 		}
 
 		commitMsg := fmt.Sprintf("%s: resolve merge conflicts with %s", job.TicketKey, ri.repo.BaseBranch)
-		_, err = p.git.CommitChanges(
+		sha, err := p.git.CommitChanges(
 			ri.repo.Owner, settings.CommitOwnerFor(ri.repo), ri.repo.Repo, branchName,
 			commitMsg, repoDir, ri.repo.BaseBranch, workItem.Assignee, importExcludes, skipFileGuardrail,
 		)
@@ -601,12 +624,13 @@ func (p *Pipeline) commitMultiRepoMergeResolution(
 			continue
 		}
 		if err != nil {
-			return false, fmt.Errorf("commit merge for %s: %w", ri.repo.Name, err)
+			return false, "", fmt.Errorf("commit merge for %s: %w", ri.repo.Name, err)
 		}
 		committed = true
+		lastSHA = sha
 
 		if err := p.git.SyncWithRemote(repoDir, branchName, importExcludes); err != nil {
-			return false, fmt.Errorf("sync with remote for %s: %w", ri.repo.Name, err)
+			return false, "", fmt.Errorf("sync with remote for %s: %w", ri.repo.Name, err)
 		}
 	}
 
@@ -614,7 +638,7 @@ func (p *Pipeline) commitMultiRepoMergeResolution(
 		logger.Info("Multi-repo merge conflicts resolved via AI",
 			zap.Int("repos", len(repoInfos)))
 	}
-	return committed, nil
+	return committed, lastSHA, nil
 }
 
 // upstreamMergeURL returns the upstream clone URL when fork mode is
@@ -658,7 +682,7 @@ func (p *Pipeline) commitMultiRepoCleanMerge(
 		}
 
 		commitMsg := fmt.Sprintf("%s: merge %s into %s", job.TicketKey, ri.repo.BaseBranch, branchName)
-		_, err = p.git.CommitChanges(
+		sha, err := p.git.CommitChanges(
 			ri.repo.Owner, settings.CommitOwnerFor(ri.repo), ri.repo.Repo, branchName,
 			commitMsg, repoDir, ri.repo.BaseBranch, workItem.Assignee, nil, skipFileGuardrail,
 		)
@@ -669,6 +693,7 @@ func (p *Pipeline) commitMultiRepoCleanMerge(
 			return result, fmt.Errorf("commit clean merge for %s: %w", ri.repo.Name, err)
 		}
 		committed = true
+		result.MergeCommitSHA = sha
 
 		if err := p.git.SyncWithRemote(repoDir, branchName, nil); err != nil {
 			return result, fmt.Errorf("sync with remote for %s: %w", ri.repo.Name, err)
@@ -702,5 +727,100 @@ func (p *Pipeline) handleMergeFailure(
 	comment := fmt.Sprintf("AI merge processing failed: %s", jobErr.Error())
 	if err := p.tracker.AddComment(ticketKey, comment); err != nil {
 		logger.Error("Failed to post error comment", zap.Error(err))
+	}
+}
+
+// commandSourceBaseBranch returns the base branch for the repo that
+// the sync command was posted on. Falls back to the first repo's
+// base branch when CommandSource is nil or does not match any repo.
+func (p *Pipeline) commandSourceBaseBranch(src *jobmanager.CommandSource, settings *models.ProjectSettings) string {
+	if src != nil {
+		for _, r := range settings.Repos {
+			if r.Owner == src.Owner && r.Repo == src.Repo {
+				return r.BaseBranch
+			}
+		}
+	}
+	return settings.Repos[0].BaseBranch
+}
+
+// postMergeCommandReply posts the initial acknowledgment reply for a
+// sync command. Returns the reply comment ID (for later editing) or
+// 0 if posting failed. Best-effort: failures are logged but do not
+// block the merge.
+func (p *Pipeline) postMergeCommandReply(
+	logger *zap.Logger,
+	src *jobmanager.CommandSource,
+	commandCommentID int64,
+	baseBranch, headBranch string,
+) int64 {
+	body := fmt.Sprintf("Merging from %s -> %s\n%s",
+		baseBranch, headBranch,
+		commentfilter.AddressedMarker(commandCommentID))
+
+	id, err := p.git.PostIssueComment(src.Owner, src.Repo, src.PRNumber, body)
+	if err != nil {
+		logger.Warn("Failed to post sync command reply",
+			zap.String("repo", src.Owner+"/"+src.Repo),
+			zap.Int64("command_comment_id", commandCommentID),
+			zap.Error(err))
+		return 0
+	}
+	return id
+}
+
+// updateMergeCommandReply edits the sync command reply with the
+// outcome. Best-effort: failures are logged but do not affect the
+// merge result.
+func (p *Pipeline) updateMergeCommandReply(
+	logger *zap.Logger,
+	src *jobmanager.CommandSource,
+	replyID, commandCommentID int64,
+	baseBranch, headBranch string,
+	commitSHA string,
+	mergeErr error,
+) {
+	if replyID == 0 {
+		return
+	}
+
+	var body string
+	if mergeErr != nil {
+		body = fmt.Sprintf("Failed to merge from %s -> %s: %s",
+			baseBranch, headBranch, mergeErr.Error())
+	} else if commitSHA != "" {
+		body = fmt.Sprintf("Successfully merged from %s -> %s; change %s",
+			baseBranch, headBranch, commitSHA)
+	} else {
+		body = fmt.Sprintf("Merge from %s -> %s: already up to date",
+			baseBranch, headBranch)
+	}
+	body += "\n" + commentfilter.AddressedMarker(commandCommentID)
+
+	if err := p.git.UpdateIssueComment(src.Owner, src.Repo, replyID, body); err != nil {
+		logger.Warn("Failed to update sync command reply",
+			zap.String("repo", src.Owner+"/"+src.Repo),
+			zap.Int64("reply_id", replyID),
+			zap.Error(err))
+	}
+}
+
+// postPreflightFailureReply posts an addressed failure reply when the
+// merge pipeline fails before the normal reply lifecycle is set up
+// (e.g., GetWorkItem or ResolveProject fails). Without this, the
+// command stays unaddressed and the scanner re-detects it every cycle.
+func (p *Pipeline) postPreflightFailureReply(logger *zap.Logger, job *jobmanager.Job, preflightErr error) {
+	if job.CommandSource == nil {
+		return
+	}
+	src := job.CommandSource
+	body := fmt.Sprintf("Failed to process sync command: %s\n%s",
+		preflightErr.Error(),
+		commentfilter.AddressedMarker(src.CommentID))
+
+	if _, err := p.git.PostIssueComment(src.Owner, src.Repo, src.PRNumber, body); err != nil {
+		logger.Warn("Failed to post preflight failure reply",
+			zap.String("repo", src.Owner+"/"+src.Repo),
+			zap.Error(err))
 	}
 }

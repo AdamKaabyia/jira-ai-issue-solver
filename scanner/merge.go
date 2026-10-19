@@ -4,12 +4,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"strings"
 	"sync"
 	"time"
 
 	"go.uber.org/zap"
 
+	"jira-ai-issue-solver/commentfilter"
 	"jira-ai-issue-solver/jobmanager"
 	"jira-ai-issue-solver/models"
 )
@@ -58,19 +58,38 @@ type MergeScannerConfig struct {
 // has merge conflicts, the scanner emits [jobmanager.JobTypeMerge]
 // events. PRs without recent human activity are labeled as idle
 // instead of merged.
+//
+// When configured with [WithMergeCommands], the scanner also detects
+// @botname sync commands in PR comments and submits merge events
+// for them.
 type MergeScanner struct {
-	searcher   IssueSearcher
-	submitter  JobSubmitter
-	prs        PRFetcher
-	repos      RepoLocator
-	mergeCheck MergeabilityChecker
-	labeler    PRLabeler
-	cfg        MergeScannerConfig
-	logger     *zap.Logger
+	searcher             IssueSearcher
+	submitter            JobSubmitter
+	prs                  PRFetcher
+	repos                RepoLocator
+	mergeCheck           MergeabilityChecker
+	labeler              PRLabeler
+	mergeCommandsEnabled bool
+	cfg                  MergeScannerConfig
+	logger               *zap.Logger
 
 	mu     sync.Mutex
 	cancel context.CancelFunc
 	done   chan struct{}
+}
+
+// MergeScannerOption configures optional behavior on a
+// [MergeScanner]. Pass to [NewMergeScanner].
+type MergeScannerOption func(*MergeScanner)
+
+// WithMergeCommands enables detection of @botname sync commands in
+// PR comments. When a user posts @botname sync on a PR, the scanner
+// submits a merge event. The executor posts a reply to acknowledge
+// the command and edits it with the outcome.
+func WithMergeCommands() MergeScannerOption {
+	return func(s *MergeScanner) {
+		s.mergeCommandsEnabled = true
+	}
 }
 
 // NewMergeScanner creates a MergeScanner with the given dependencies.
@@ -84,6 +103,7 @@ func NewMergeScanner(
 	labeler PRLabeler,
 	cfg MergeScannerConfig,
 	logger *zap.Logger,
+	opts ...MergeScannerOption,
 ) (*MergeScanner, error) {
 	if searcher == nil {
 		return nil, errors.New("issue searcher must not be nil")
@@ -113,7 +133,7 @@ func NewMergeScanner(
 		return nil, errors.New("logger must not be nil")
 	}
 
-	return &MergeScanner{
+	s := &MergeScanner{
 		searcher:   searcher,
 		submitter:  submitter,
 		prs:        prs,
@@ -122,7 +142,11 @@ func NewMergeScanner(
 		labeler:    labeler,
 		cfg:        cfg,
 		logger:     logger,
-	}, nil
+	}
+	for _, opt := range opts {
+		opt(s)
+	}
+	return s, nil
 }
 
 // Start begins polling in a background goroutine.
@@ -197,8 +221,10 @@ func (s *MergeScanner) scan(ctx context.Context) {
 }
 
 // checkAndSubmit checks a ticket's PRs for merge conflicts and
-// submits a merge event if any PR is unmergeable. Returns true if
-// the scan cycle should stop (circuit breaker open or shutdown).
+// submits a merge event if any PR is unmergeable. When merge commands
+// are enabled, also checks for @botname sync commands in PR comments.
+// Returns true if the scan cycle should stop (circuit breaker open or
+// shutdown).
 func (s *MergeScanner) checkAndSubmit(item models.WorkItem) bool {
 	logger := s.logger.With(zap.String("ticket", item.Key))
 
@@ -211,15 +237,13 @@ func (s *MergeScanner) checkAndSubmit(item models.WorkItem) bool {
 	branchName := fmt.Sprintf("%s/%s", s.cfg.BotUsername, item.Key)
 	heads := s.repos.ForkOwnerHeads(item, branchName)
 
-	found := false
+	// Check for merge conflicts (existing behavior).
+	shouldSubmit := false
 	for _, head := range heads {
 		if s.hasUnmergeablePR(logger, repos, head) {
-			found = true
+			shouldSubmit = true
 			break
 		}
-	}
-	if !found {
-		return false
 	}
 
 	event := jobmanager.Event{
@@ -227,7 +251,28 @@ func (s *MergeScanner) checkAndSubmit(item models.WorkItem) bool {
 		TicketKey: item.Key,
 	}
 
-	_, err = s.submitter.Submit(event)
+	// If no conflicts, check for sync commands.
+	if !shouldSubmit && s.mergeCommandsEnabled {
+		for _, head := range heads {
+			if src := s.findMergeCommand(logger, repos, head); src != nil {
+				event.CommandSource = src
+				shouldSubmit = true
+				break
+			}
+		}
+	}
+
+	if !shouldSubmit {
+		return false
+	}
+
+	return s.submitMergeEvent(logger, event)
+}
+
+// submitMergeEvent submits a merge event and handles errors. Returns
+// true if the scan cycle should stop.
+func (s *MergeScanner) submitMergeEvent(logger *zap.Logger, event jobmanager.Event) bool {
+	_, err := s.submitter.Submit(event)
 	if err == nil {
 		logger.Info("Submitted merge event")
 		return false
@@ -252,6 +297,85 @@ func (s *MergeScanner) checkAndSubmit(item models.WorkItem) bool {
 	}
 
 	return false
+}
+
+// findMergeCommand checks all repos for PRs containing an unaddressed
+// @botname sync command in conversation comments. Uses the same
+// addressed-marker pattern as the feedback pipeline: the executor
+// posts a reply with <!-- addressed: ID -->, and BotRepliedTo detects
+// it on subsequent scans. Returns nil if no unaddressed command exists.
+func (s *MergeScanner) findMergeCommand(
+	logger *zap.Logger,
+	repos []models.RepoCoord,
+	head string,
+) *jobmanager.CommandSource {
+	normBot := commentfilter.NormalizeUsername(s.cfg.BotUsername)
+	mergeRe := commentfilter.BotCommandRe(s.cfg.BotUsername, "sync")
+
+	for _, r := range repos {
+		pr, err := s.prs.GetPRForBranch(r.Owner, r.Repo, head)
+		if err != nil {
+			logger.Warn("Error looking up PR for sync command",
+				zap.String("repo", r.Owner+"/"+r.Repo),
+				zap.Error(err))
+			continue
+		}
+		if pr == nil {
+			continue
+		}
+
+		if s.hasSkipLabel(logger, r, pr) {
+			continue
+		}
+
+		comments, err := s.prs.GetPRComments(r.Owner, r.Repo, pr.Number, time.Time{})
+		if err != nil {
+			logger.Warn("Failed to fetch PR comments for sync command check",
+				zap.String("repo", r.Owner+"/"+r.Repo),
+				zap.Error(err))
+			continue
+		}
+
+		// Filter to conversation comments only — sync commands on
+		// file diffs (review comments) are not supported, and the
+		// addressed-marker reply is always a conversation comment.
+		convComments := make([]models.PRComment, 0, len(comments))
+		for _, c := range comments {
+			if !c.IsReviewComment {
+				convComments = append(convComments, c)
+			}
+		}
+
+		addressed := commentfilter.BotRepliedTo(convComments, normBot)
+
+		for _, c := range convComments {
+			if commentfilter.NormalizeUsername(c.Author.Username) == normBot {
+				continue
+			}
+
+			if !mergeRe.MatchString(c.Body) {
+				continue
+			}
+
+			if addressed[c.ID] {
+				continue
+			}
+
+			logger.Info("Found sync command",
+				zap.String("repo", r.Owner+"/"+r.Repo),
+				zap.Int("pr", pr.Number),
+				zap.String("author", c.Author.Username))
+
+			return &jobmanager.CommandSource{
+				Owner:     r.Owner,
+				Repo:      r.Repo,
+				PRNumber:  pr.Number,
+				CommentID: c.ID,
+			}
+		}
+	}
+
+	return nil
 }
 
 // hasUnmergeablePR checks all repos for PRs with merge conflicts.
@@ -452,18 +576,17 @@ func lastHumanCommentTime(
 	knownBots, ignoredUsers []string,
 ) time.Time {
 	excluded := make(map[string]bool)
-	excluded[strings.ToLower(strings.TrimSuffix(botUsername, "[bot]"))] = true
+	excluded[commentfilter.NormalizeUsername(botUsername)] = true
 	for _, u := range knownBots {
-		excluded[strings.ToLower(strings.TrimSuffix(u, "[bot]"))] = true
+		excluded[commentfilter.NormalizeUsername(u)] = true
 	}
 	for _, u := range ignoredUsers {
-		excluded[strings.ToLower(strings.TrimSuffix(u, "[bot]"))] = true
+		excluded[commentfilter.NormalizeUsername(u)] = true
 	}
 
 	var latest time.Time
 	for _, c := range comments {
-		normAuthor := strings.ToLower(strings.TrimSuffix(c.Author.Username, "[bot]"))
-		if excluded[normAuthor] {
+		if excluded[commentfilter.NormalizeUsername(c.Author.Username)] {
 			continue
 		}
 		if c.Timestamp.After(latest) {

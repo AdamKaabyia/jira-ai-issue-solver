@@ -51,9 +51,10 @@ func (p *Pipeline) executeFeedback(ctx context.Context, job *jobmanager.Job) (re
 		logger.Info("Per-ticket cost cap exceeded, skipping feedback",
 			zap.String("ticket", job.TicketKey),
 			zap.Float64("cap_usd", settings.MaxTicketCostUSD))
-		p.setFailureLabel(logger, job.TicketKey, settings.FailureLabels, settings.FailureLabels.Blocked)
+		p.applyCostCapPRLabel(logger, job.TicketKey, settings, true)
 		return result, errTicketCostCapExceeded
 	}
+	p.applyCostCapPRLabel(logger, job.TicketKey, settings, false)
 
 	defer func() {
 		// On failure post error comment (but do NOT revert status --
@@ -841,7 +842,7 @@ func (p *Pipeline) replyToCommentsOnRepo(
 		} else {
 			contextual := conversationReplyBody(c, replyBody)
 			markedBody := fmt.Sprintf("%s\n%s", contextual, commentfilter.AddressedMarker(c.ID))
-			if err := p.git.PostIssueComment(owner, repo, pr.Number, markedBody); err != nil {
+			if _, err := p.git.PostIssueComment(owner, repo, pr.Number, markedBody); err != nil {
 				logger.Warn("Failed to reply to conversation comment",
 					zap.Int64("comment_id", c.ID),
 					zap.Error(err))
@@ -924,7 +925,8 @@ func (p *Pipeline) handleFeedbackFailure(
 	settings *models.ProjectSettings,
 	jobErr error,
 ) {
-	p.setFailureLabel(logger, ticketKey, settings.FailureLabels, settings.FailureLabels.Blocked)
+	allLabels := models.AllPipelineLabels(settings.FailureLabels, settings.LifecycleLabels)
+	p.setPipelineLabel(logger, ticketKey, allLabels, settings.FailureLabels.Blocked)
 
 	if settings.DisableErrorComments {
 		return
@@ -1000,7 +1002,7 @@ func (p *Pipeline) replyToComments(
 		} else {
 			contextual := conversationReplyBody(c, replyBody)
 			markedBody := fmt.Sprintf("%s\n%s", contextual, commentfilter.AddressedMarker(c.ID))
-			if err := p.git.PostIssueComment(
+			if _, err := p.git.PostIssueComment(
 				settings.Repos[0].Owner, settings.Repos[0].Repo, prDetails.Number, markedBody); err != nil {
 				logger.Warn("Failed to reply to conversation comment",
 					zap.Int64("comment_id", c.ID),
@@ -1048,7 +1050,7 @@ func (p *Pipeline) replyUnableToAddress(
 		} else {
 			contextual := conversationReplyBody(c, replyBody)
 			markedBody := fmt.Sprintf("%s\n%s", contextual, commentfilter.AddressedMarker(c.ID))
-			if err := p.git.PostIssueComment(
+			if _, err := p.git.PostIssueComment(
 				settings.Repos[0].Owner, settings.Repos[0].Repo, prDetails.Number, markedBody); err != nil {
 				logger.Warn("Failed to reply to conversation comment",
 					zap.Int64("comment_id", c.ID),
@@ -1228,7 +1230,7 @@ func (p *Pipeline) postCIFixMarker(
 		return
 	}
 	marker := commentfilter.CIFixAttemptMarker(ciFailures, commitSHA)
-	if err := p.git.PostIssueComment(owner, repo, prNumber, marker); err != nil {
+	if _, err := p.git.PostIssueComment(owner, repo, prNumber, marker); err != nil {
 		logger.Warn("Failed to post CI fix attempt marker", zap.Error(err))
 	}
 }

@@ -641,9 +641,9 @@ func TestExecuteFeedback_ConversationCommentUsesPostIssueComment(t *testing.T) {
 	}
 
 	var issueCommentBody string
-	d.git.PostIssueCommentFunc = func(_, _ string, _ int, body string) error {
+	d.git.PostIssueCommentFunc = func(_, _ string, _ int, body string) (int64, error) {
 		issueCommentBody = body
-		return nil
+		return 0, nil
 	}
 
 	p := d.pipeline(t)
@@ -684,9 +684,9 @@ func TestExecuteFeedback_ReviewCommentUsesReplyToComment(t *testing.T) {
 	}
 
 	issueCommentCalled := false
-	d.git.PostIssueCommentFunc = func(_, _ string, _ int, _ string) error {
+	d.git.PostIssueCommentFunc = func(_, _ string, _ int, _ string) (int64, error) {
 		issueCommentCalled = true
-		return nil
+		return 0, nil
 	}
 
 	p := d.pipeline(t)
@@ -722,9 +722,9 @@ func TestExecuteFeedback_MixedCommentTypes(t *testing.T) {
 	}
 
 	var issueCommentBodies []string
-	d.git.PostIssueCommentFunc = func(_, _ string, _ int, body string) error {
+	d.git.PostIssueCommentFunc = func(_, _ string, _ int, body string) (int64, error) {
 		issueCommentBodies = append(issueCommentBodies, body)
-		return nil
+		return 0, nil
 	}
 
 	p := d.pipeline(t)
@@ -1517,9 +1517,9 @@ func TestMultiRepoFeedback_CIFixMarkerUsesActualSHA(t *testing.T) {
 		body string
 	}
 	var postedComments []issueComment
-	d.git.PostIssueCommentFunc = func(_, repo string, _ int, body string) error {
+	d.git.PostIssueCommentFunc = func(_, repo string, _ int, body string) (int64, error) {
 		postedComments = append(postedComments, issueComment{repo: repo, body: body})
-		return nil
+		return 0, nil
 	}
 
 	p := d.pipelineWithConfig(t, executor.Config{
@@ -1608,9 +1608,9 @@ func TestMultiRepoFeedback_CIFixMarkerPartialMapOnSyncError(t *testing.T) {
 		body string
 	}
 	var postedComments []issueComment
-	d.git.PostIssueCommentFunc = func(_, repo string, _ int, body string) error {
+	d.git.PostIssueCommentFunc = func(_, repo string, _ int, body string) (int64, error) {
 		postedComments = append(postedComments, issueComment{repo: repo, body: body})
-		return nil
+		return 0, nil
 	}
 
 	p := d.pipelineWithConfig(t, executor.Config{

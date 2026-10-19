@@ -33,10 +33,10 @@ func CIFixAttemptMarker(failures []models.CheckRunFailure, commitSHA string) str
 // CountCIFixAttempts counts the number of ci-fix-attempt markers in
 // the given PR comments from the bot.
 func CountCIFixAttempts(comments []models.PRComment, botUsername string) int {
-	normBot := normalizeUsername(botUsername)
+	normBot := NormalizeUsername(botUsername)
 	count := 0
 	for _, c := range comments {
-		if normalizeUsername(c.Author.Username) != normBot {
+		if NormalizeUsername(c.Author.Username) != normBot {
 			continue
 		}
 		if ciFixAttemptRe.MatchString(c.Body) {

@@ -954,11 +954,11 @@ func newMergeDeps() *mergeDeps {
 	}
 }
 
-func (d *mergeDeps) scanner(t *testing.T) *scanner.MergeScanner {
+func (d *mergeDeps) scanner(t *testing.T, opts ...scanner.MergeScannerOption) *scanner.MergeScanner {
 	t.Helper()
 	s, err := scanner.NewMergeScanner(
 		d.searcher, d.submitter, d.prs, d.repos,
-		d.mergeCheck, d.labeler, d.cfg, zap.NewNop())
+		d.mergeCheck, d.labeler, d.cfg, zap.NewNop(), opts...)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1089,5 +1089,293 @@ func TestMergeScanner_SkipPRLabel_MultiRepo_SkipsOnlyLabeledPR(t *testing.T) {
 	}
 	if !submitted {
 		t.Error("expected merge event from active-repo's unmergeable PR")
+	}
+}
+
+// --- Merge command detection ---
+
+func TestMergeScanner_SyncCommand_DetectedAndSubmitted(t *testing.T) {
+	d := newMergeDeps()
+
+	mergeable := true
+	d.mergeCheck.GetPRMergeabilityFunc = func(_, _ string, _ int) (*models.PRMergeState, error) {
+		return &models.PRMergeState{Mergeable: &mergeable, BaseBranch: "main"}, nil
+	}
+
+	d.prs.GetPRCommentsFunc = func(_, _ string, _ int, _ time.Time) ([]models.PRComment, error) {
+		return []models.PRComment{
+			{ID: 100, Author: models.Author{Username: "reviewer"}, Body: "@ai-bot sync", Timestamp: time.Now()},
+		}, nil
+	}
+
+	var submitted []jobmanager.Event
+	d.submitter.SubmitFunc = func(e jobmanager.Event) (*jobmanager.Job, error) {
+		submitted = append(submitted, e)
+		return &jobmanager.Job{}, nil
+	}
+
+	runOneMergeScan(t, d.scanner(t, scanner.WithMergeCommands()))
+
+	if len(submitted) != 1 {
+		t.Fatalf("expected 1 event, got %d", len(submitted))
+	}
+	if submitted[0].Type != jobmanager.JobTypeMerge {
+		t.Errorf("expected JobTypeMerge, got %s", submitted[0].Type)
+	}
+	if submitted[0].CommandSource == nil {
+		t.Fatal("expected CommandSource to be set")
+	}
+	if submitted[0].CommandSource.CommentID != 100 {
+		t.Errorf("expected CommentID 100, got %d", submitted[0].CommandSource.CommentID)
+	}
+	if submitted[0].CommandSource.PRNumber != 42 {
+		t.Errorf("expected PRNumber 42, got %d", submitted[0].CommandSource.PRNumber)
+	}
+}
+
+func TestMergeScanner_SyncCommand_AlreadyAddressed(t *testing.T) {
+	d := newMergeDeps()
+
+	mergeable := true
+	d.mergeCheck.GetPRMergeabilityFunc = func(_, _ string, _ int) (*models.PRMergeState, error) {
+		return &models.PRMergeState{Mergeable: &mergeable, BaseBranch: "main"}, nil
+	}
+
+	d.prs.GetPRCommentsFunc = func(_, _ string, _ int, _ time.Time) ([]models.PRComment, error) {
+		return []models.PRComment{
+			{ID: 100, Author: models.Author{Username: "reviewer"}, Body: "@ai-bot sync"},
+			{ID: 200, Author: models.Author{Username: "ai-bot[bot]"}, Body: "Merging from main -> ai-bot/PROJ-1\n<!-- addressed: 100 -->"},
+		}, nil
+	}
+
+	submitted := false
+	d.submitter.SubmitFunc = func(_ jobmanager.Event) (*jobmanager.Job, error) {
+		submitted = true
+		return &jobmanager.Job{}, nil
+	}
+
+	runOneMergeScan(t, d.scanner(t, scanner.WithMergeCommands()))
+
+	if submitted {
+		t.Error("expected no merge event when sync command already addressed by bot reply")
+	}
+}
+
+func TestMergeScanner_SyncCommand_AlreadyAddressed_BotSuffix(t *testing.T) {
+	d := newMergeDeps()
+	d.cfg.BotUsername = "ai-bot[bot]"
+
+	mergeable := true
+	d.mergeCheck.GetPRMergeabilityFunc = func(_, _ string, _ int) (*models.PRMergeState, error) {
+		return &models.PRMergeState{Mergeable: &mergeable, BaseBranch: "main"}, nil
+	}
+
+	d.prs.GetPRCommentsFunc = func(_, _ string, _ int, _ time.Time) ([]models.PRComment, error) {
+		return []models.PRComment{
+			{ID: 100, Author: models.Author{Username: "reviewer"}, Body: "@ai-bot sync"},
+			{ID: 200, Author: models.Author{Username: "ai-bot[bot]"}, Body: "Merging from main -> ai-bot/PROJ-1\n<!-- addressed: 100 -->"},
+		}, nil
+	}
+
+	submitted := false
+	d.submitter.SubmitFunc = func(_ jobmanager.Event) (*jobmanager.Job, error) {
+		submitted = true
+		return &jobmanager.Job{}, nil
+	}
+
+	runOneMergeScan(t, d.scanner(t, scanner.WithMergeCommands()))
+
+	if submitted {
+		t.Error("expected no merge event when bot username has [bot] suffix and command is already addressed")
+	}
+}
+
+func TestMergeScanner_SyncCommand_SkippedWithoutOption(t *testing.T) {
+	d := newMergeDeps()
+
+	mergeable := true
+	d.mergeCheck.GetPRMergeabilityFunc = func(_, _ string, _ int) (*models.PRMergeState, error) {
+		return &models.PRMergeState{Mergeable: &mergeable, BaseBranch: "main"}, nil
+	}
+
+	d.prs.GetPRCommentsFunc = func(_, _ string, _ int, _ time.Time) ([]models.PRComment, error) {
+		return []models.PRComment{
+			{ID: 100, Author: models.Author{Username: "reviewer"}, Body: "@ai-bot sync"},
+		}, nil
+	}
+
+	submitted := false
+	d.submitter.SubmitFunc = func(_ jobmanager.Event) (*jobmanager.Job, error) {
+		submitted = true
+		return &jobmanager.Job{}, nil
+	}
+
+	runOneMergeScan(t, d.scanner(t))
+
+	if submitted {
+		t.Error("expected no merge event when sync commands not configured")
+	}
+}
+
+func TestMergeScanner_SyncCommand_IgnoresBotOwnComment(t *testing.T) {
+	d := newMergeDeps()
+
+	mergeable := true
+	d.mergeCheck.GetPRMergeabilityFunc = func(_, _ string, _ int) (*models.PRMergeState, error) {
+		return &models.PRMergeState{Mergeable: &mergeable, BaseBranch: "main"}, nil
+	}
+
+	d.prs.GetPRCommentsFunc = func(_, _ string, _ int, _ time.Time) ([]models.PRComment, error) {
+		return []models.PRComment{
+			{ID: 100, Author: models.Author{Username: "ai-bot[bot]"}, Body: "@ai-bot sync"},
+		}, nil
+	}
+
+	submitted := false
+	d.submitter.SubmitFunc = func(_ jobmanager.Event) (*jobmanager.Job, error) {
+		submitted = true
+		return &jobmanager.Job{}, nil
+	}
+
+	runOneMergeScan(t, d.scanner(t, scanner.WithMergeCommands()))
+
+	if submitted {
+		t.Error("expected no merge event for bot's own sync command")
+	}
+}
+
+func TestMergeScanner_SyncCommand_SkippedWhenPRHasSkipLabel(t *testing.T) {
+	d := newMergeDeps()
+	d.cfg.SkipPRLabel = "ai-bot-skip"
+
+	mergeable := true
+	d.mergeCheck.GetPRMergeabilityFunc = func(_, _ string, _ int) (*models.PRMergeState, error) {
+		return &models.PRMergeState{Mergeable: &mergeable, BaseBranch: "main"}, nil
+	}
+
+	d.labeler.HasPRLabelFunc = func(_, _ string, _ int, label string) (bool, error) {
+		return label == "ai-bot-skip", nil
+	}
+
+	d.prs.GetPRCommentsFunc = func(_, _ string, _ int, _ time.Time) ([]models.PRComment, error) {
+		return []models.PRComment{
+			{ID: 100, Author: models.Author{Username: "reviewer"}, Body: "@ai-bot sync"},
+		}, nil
+	}
+
+	submitted := false
+	d.submitter.SubmitFunc = func(_ jobmanager.Event) (*jobmanager.Job, error) {
+		submitted = true
+		return &jobmanager.Job{}, nil
+	}
+
+	runOneMergeScan(t, d.scanner(t, scanner.WithMergeCommands()))
+
+	if submitted {
+		t.Error("expected no merge event when PR has skip label")
+	}
+}
+
+func TestMergeScanner_SyncCommand_NoCommandPresent(t *testing.T) {
+	d := newMergeDeps()
+
+	mergeable := true
+	d.mergeCheck.GetPRMergeabilityFunc = func(_, _ string, _ int) (*models.PRMergeState, error) {
+		return &models.PRMergeState{Mergeable: &mergeable, BaseBranch: "main"}, nil
+	}
+
+	d.prs.GetPRCommentsFunc = func(_, _ string, _ int, _ time.Time) ([]models.PRComment, error) {
+		return []models.PRComment{
+			{ID: 100, Author: models.Author{Username: "reviewer"}, Body: "Looks good to me!"},
+		}, nil
+	}
+
+	submitted := false
+	d.submitter.SubmitFunc = func(_ jobmanager.Event) (*jobmanager.Job, error) {
+		submitted = true
+		return &jobmanager.Job{}, nil
+	}
+
+	runOneMergeScan(t, d.scanner(t, scanner.WithMergeCommands()))
+
+	if submitted {
+		t.Error("expected no merge event when no sync command present")
+	}
+}
+
+func TestMergeScanner_SyncCommand_CommentFetchError(t *testing.T) {
+	d := newMergeDeps()
+
+	mergeable := true
+	d.mergeCheck.GetPRMergeabilityFunc = func(_, _ string, _ int) (*models.PRMergeState, error) {
+		return &models.PRMergeState{Mergeable: &mergeable, BaseBranch: "main"}, nil
+	}
+
+	d.prs.GetPRCommentsFunc = func(_, _ string, _ int, _ time.Time) ([]models.PRComment, error) {
+		return nil, errors.New("API error")
+	}
+
+	submitted := false
+	d.submitter.SubmitFunc = func(_ jobmanager.Event) (*jobmanager.Job, error) {
+		submitted = true
+		return &jobmanager.Job{}, nil
+	}
+
+	runOneMergeScan(t, d.scanner(t, scanner.WithMergeCommands()))
+
+	if submitted {
+		t.Error("expected no merge event when comment fetch fails")
+	}
+}
+
+func TestMergeScanner_SyncCommand_IgnoresReviewComments(t *testing.T) {
+	d := newMergeDeps()
+
+	mergeable := true
+	d.mergeCheck.GetPRMergeabilityFunc = func(_, _ string, _ int) (*models.PRMergeState, error) {
+		return &models.PRMergeState{Mergeable: &mergeable, BaseBranch: "main"}, nil
+	}
+
+	d.prs.GetPRCommentsFunc = func(_, _ string, _ int, _ time.Time) ([]models.PRComment, error) {
+		return []models.PRComment{
+			{ID: 100, Author: models.Author{Username: "reviewer"}, Body: "@ai-bot sync", IsReviewComment: true},
+		}, nil
+	}
+
+	submitted := false
+	d.submitter.SubmitFunc = func(_ jobmanager.Event) (*jobmanager.Job, error) {
+		submitted = true
+		return &jobmanager.Job{}, nil
+	}
+
+	runOneMergeScan(t, d.scanner(t, scanner.WithMergeCommands()))
+
+	if submitted {
+		t.Error("expected no merge event for review comment sync commands")
+	}
+}
+
+func TestMergeScanner_SyncCommand_ConflictsTakePriority(t *testing.T) {
+	d := newMergeDeps()
+	d.cfg.IdleDays = 0
+
+	mergeable := false
+	d.mergeCheck.GetPRMergeabilityFunc = func(_, _ string, _ int) (*models.PRMergeState, error) {
+		return &models.PRMergeState{Mergeable: &mergeable, BaseBranch: "main"}, nil
+	}
+
+	var submitted []jobmanager.Event
+	d.submitter.SubmitFunc = func(e jobmanager.Event) (*jobmanager.Job, error) {
+		submitted = append(submitted, e)
+		return &jobmanager.Job{}, nil
+	}
+
+	runOneMergeScan(t, d.scanner(t, scanner.WithMergeCommands()))
+
+	if len(submitted) != 1 {
+		t.Fatalf("expected 1 event, got %d", len(submitted))
+	}
+	if submitted[0].CommandSource != nil {
+		t.Error("expected no CommandSource when merge triggered by conflicts")
 	}
 }

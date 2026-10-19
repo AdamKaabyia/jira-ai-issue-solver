@@ -1029,10 +1029,12 @@ func TestResolveProject_FailureLabels(t *testing.T) {
 
 func TestResolveProject_PRValidationLabels(t *testing.T) {
 	t.Run("passes through configured labels", func(t *testing.T) {
+		customCCE := "custom-cce"
 		cfg := minimalConfig()
 		cfg.Jira.Projects[0].PRValidationLabels = models.PRValidationLabels{
 			ValidationFailed: "custom-vf",
 			NonzeroExit:      "custom-nze",
+			CostCapExceeded:  &customCCE,
 		}
 		r, err := projectresolver.NewConfigResolver(cfg)
 		if err != nil {
@@ -1054,9 +1056,12 @@ func TestResolveProject_PRValidationLabels(t *testing.T) {
 		if ps.PRValidationLabels.NonzeroExit != "custom-nze" {
 			t.Errorf("NonzeroExit = %q, want %q", ps.PRValidationLabels.NonzeroExit, "custom-nze")
 		}
+		if ps.PRValidationLabels.CostCapLabel() != "custom-cce" {
+			t.Errorf("CostCapLabel() = %q, want %q", ps.PRValidationLabels.CostCapLabel(), "custom-cce")
+		}
 	})
 
-	t.Run("defaults to empty when not configured", func(t *testing.T) {
+	t.Run("defaults cost_cap_exceeded when not configured", func(t *testing.T) {
 		cfg := minimalConfig()
 		r, err := projectresolver.NewConfigResolver(cfg)
 		if err != nil {
@@ -1072,8 +1077,39 @@ func TestResolveProject_PRValidationLabels(t *testing.T) {
 			t.Fatalf("unexpected error: %v", err)
 		}
 
-		if ps.PRValidationLabels != (models.PRValidationLabels{}) {
-			t.Errorf("expected zero PRValidationLabels, got %+v", ps.PRValidationLabels)
+		if ps.PRValidationLabels.ValidationFailed != "" {
+			t.Errorf("ValidationFailed = %q, want empty", ps.PRValidationLabels.ValidationFailed)
+		}
+		if ps.PRValidationLabels.NonzeroExit != "" {
+			t.Errorf("NonzeroExit = %q, want empty", ps.PRValidationLabels.NonzeroExit)
+		}
+		if ps.PRValidationLabels.CostCapLabel() != "ai-budget-exceeded" {
+			t.Errorf("CostCapLabel() = %q, want %q", ps.PRValidationLabels.CostCapLabel(), "ai-budget-exceeded")
+		}
+	})
+
+	t.Run("explicit empty disables cost_cap_exceeded", func(t *testing.T) {
+		empty := ""
+		cfg := minimalConfig()
+		cfg.Jira.Projects[0].PRValidationLabels = models.PRValidationLabels{
+			CostCapExceeded: &empty,
+		}
+		r, err := projectresolver.NewConfigResolver(cfg)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+
+		ps, err := r.ResolveProject(models.WorkItem{
+			Key:        "PROJ-1",
+			Type:       "Bug",
+			Components: []string{"backend"},
+		})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+
+		if ps.PRValidationLabels.CostCapLabel() != "" {
+			t.Errorf("CostCapLabel() = %q, want empty (disabled)", ps.PRValidationLabels.CostCapLabel())
 		}
 	})
 }

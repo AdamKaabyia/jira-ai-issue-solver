@@ -90,6 +90,12 @@ type LifecycleLabelResolver interface {
 	ResolveLifecycleLabels(item models.WorkItem) models.LifecycleLabels
 }
 
+// TriageLabelResolver resolves per-project triage label
+// configuration for a work item.
+type TriageLabelResolver interface {
+	ResolveTriageLabels(item models.WorkItem) models.TriageLabels
+}
+
 // MergedStatusResolver resolves the merged status transition for a
 // work item's project and ticket type.
 type MergedStatusResolver interface {

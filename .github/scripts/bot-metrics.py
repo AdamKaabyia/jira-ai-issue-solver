@@ -21,7 +21,7 @@ import os
 import subprocess
 import sys
 from collections import Counter, defaultdict
-from datetime import datetime, timezone, date
+from datetime import datetime, timezone, date, timedelta
 from typing import Any
 
 BOT_AUTHOR: str = os.environ.get(
@@ -63,7 +63,21 @@ def parse_time(iso_str: str | None) -> datetime | None:
 
 
 def extract_ticket(title: str) -> str | None:
-    """Extract ticket key from PR title (e.g., 'EDM-1234: ...' -> 'EDM-1234')."""
+    """Extract ticket key from a PR title, ignoring leading bracket tags.
+
+    Handles 'EDM-1234: ...', '[AI] EDM-1234: ...', and '[EDM-1234] ...'.
+    """
+    title = title.strip()
+    # Consume leading bracket tags like "[AI] ". A bracket that is itself a
+    # ticket key (e.g. "[OSAC-1082]") is returned directly.
+    while title.startswith("["):
+        end = title.find("]")
+        if end == -1:
+            break
+        inner = title[1:end].strip()
+        if "-" in inner and any(c.isdigit() for c in inner):
+            return inner
+        title = title[end + 1:].strip()
     colon_idx = title.find(":")
     if colon_idx == -1:
         return None
@@ -112,7 +126,7 @@ def fetch_prs_for_repo(repo: str) -> list[dict[str, Any]]:
     """Fetch all bot PRs from a single repo (metadata only)."""
     fields = ",".join([
         "number", "title", "state", "createdAt", "mergedAt", "closedAt",
-        "additions", "deletions", "reviews",
+        "additions", "deletions", "reviews", "url",
     ])
     prs = run_gh(
         "pr", "list",
@@ -492,8 +506,105 @@ def format_detail_sections(m: dict[str, Any]) -> list[str]:
     return lines
 
 
+WEEKLY_WINDOW_DAYS = 7
+
+
+def compute_weekly_activity(
+    prs: list[dict[str, Any]], now: datetime,
+) -> dict[str, Any]:
+    """Bucket PRs by the trailing WEEKLY_WINDOW_DAYS window ending at ``now``.
+
+    A PR appears once, tagged with the most recent action that fell in the
+    window (merged > closed > opened). Returns counts and a list of the
+    week's PRs for rendering.
+    """
+    cutoff = now - timedelta(days=WEEKLY_WINDOW_DAYS)
+    opened = merged = closed = 0
+    rows: list[dict[str, Any]] = []
+    tickets: set[str] = set()
+
+    for pr in prs:
+        created = parse_time(pr.get("createdAt"))
+        merged_at = parse_time(pr.get("mergedAt"))
+        closed_at = parse_time(pr.get("closedAt"))
+
+        action: str | None = None
+        when: datetime | None = None
+        if pr["state"] == "MERGED" and merged_at and merged_at >= cutoff:
+            action, when = "merged", merged_at
+            merged += 1
+        elif pr["state"] == "CLOSED" and closed_at and closed_at >= cutoff:
+            action, when = "closed", closed_at
+            closed += 1
+        elif created and created >= cutoff:
+            action, when = "opened", created
+
+        if action is None:
+            continue
+
+        if created and created >= cutoff:
+            opened += 1
+
+        ticket = extract_ticket(pr["title"])
+        if ticket:
+            tickets.add(ticket)
+
+        repo_short = pr["_repo"].split("/")[-1]
+        rows.append({
+            "when": when,
+            "action": action,
+            "ticket": ticket or "(no ticket)",
+            "ref": f"{repo_short}#{pr['number']}",
+            "title": pr["title"],
+            "url": pr.get("url", ""),
+        })
+
+    rows.sort(
+        key=lambda r: r["when"] or datetime.min.replace(tzinfo=timezone.utc),
+        reverse=True,
+    )
+    return {
+        "opened": opened,
+        "merged": merged,
+        "closed": closed,
+        "tickets": len(tickets),
+        "rows": rows,
+    }
+
+
+def format_weekly_section(activity: dict[str, Any]) -> list[str]:
+    """Render the trailing-window activity block."""
+    lines = [f"## Last {WEEKLY_WINDOW_DAYS} Days", ""]
+    lines.append(
+        f"**{activity['opened']}** opened · "
+        f"**{activity['merged']}** merged · "
+        f"**{activity['closed']}** closed · "
+        f"**{activity['tickets']}** tickets touched"
+    )
+    lines.append("")
+    if not activity["rows"]:
+        lines.append(
+            f"_No bot PR activity in the last {WEEKLY_WINDOW_DAYS} days._"
+        )
+        lines.append("")
+        return lines
+
+    lines.append("| Date | Action | Ticket | PR | Title |")
+    lines.append("|------|--------|--------|-----|-------|")
+    for r in activity["rows"]:
+        day = r["when"].strftime("%Y-%m-%d") if r["when"] else "—"
+        pr_cell = f"[{r['ref']}]({r['url']})" if r["url"] else r["ref"]
+        title = r["title"].replace("|", "\\|")
+        lines.append(
+            f"| {day} | {r['action']} | {r['ticket']} | {pr_cell} | {title} |"
+        )
+    lines.append("")
+    return lines
+
+
 def format_report(
     metrics: dict[str, Any], excluded_count: int, filtered_count: int,
+    weekly_activity: dict[str, Any] | None = None,
 ) -> str:
     """Render the metrics report."""
     lines: list[str] = []
@@ -519,6 +630,10 @@ def format_report(
         )
     lines.append("  \n".join(meta))
     lines.append("")
+
+    # -- Trailing-window activity (so weekly runs visibly differ) --
+    if weekly_activity is not None:
+        lines.extend(format_weekly_section(weekly_activity))
 
     lines.extend(format_summary_table(metrics))
     lines.extend(format_detail_sections(metrics))
@@ -586,7 +701,13 @@ def main() -> None:
 
     metrics = compute_metrics(filtered_prs, ci_status, pr_costs)
 
-    report = format_report(metrics, excluded_count, filtered_count)
+    weekly_activity = compute_weekly_activity(
+        filtered_prs, datetime.now(timezone.utc)
+    )
+
+    report = format_report(
+        metrics, excluded_count, filtered_count, weekly_activity
+    )
 
     summary_path = os.environ.get("GITHUB_STEP_SUMMARY")
     if summary_path:

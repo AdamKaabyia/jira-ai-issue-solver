@@ -171,10 +171,11 @@ type GitService interface {
 		commentID int64, body string) error
 
 	// PostIssueComment posts a top-level comment on a PR (via the
-	// issues endpoint). Used for replying to conversation comments,
-	// which do not support threading.
+	// issues endpoint) and returns the created comment's ID. Used
+	// for replying to conversation comments and bot command
+	// acknowledgments.
 	PostIssueComment(owner, repo string, prNumber int,
-		body string) error
+		body string) (int64, error)
 
 	// ListIssueComments returns all top-level comments on a PR.
 	// Used to find existing bot comments for update-in-place.

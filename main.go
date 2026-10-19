@@ -313,9 +313,28 @@ func main() {
 			SkipPRLabel:       config.GitHub.SkipPRLabel,
 		},
 		logger,
+		scanner.WithMergeCommands(),
 	)
 	if err != nil {
 		logger.Fatal("Failed to create merge scanner", zap.Error(err))
+	}
+
+	var triageScanner *scanner.TriageLabelScanner
+	if triageCriteria, ok := buildTriageCriteria(config); ok {
+		triageScanner, err = scanner.NewTriageLabelScanner(
+			issueTracker,
+			issueTracker,
+			resolver,
+			scanner.TriageLabelScannerConfig{
+				Criteria:     triageCriteria,
+				PollInterval: time.Duration(config.Jira.IntervalSeconds) * time.Second,
+				BotUsername:  config.Jira.Username,
+			},
+			logger,
+		)
+		if err != nil {
+			logger.Fatal("Failed to create triage label scanner", zap.Error(err))
+		}
 	}
 
 	if err := ticketScanner.Start(ctx); err != nil {
@@ -329,6 +348,11 @@ func main() {
 	}
 	if err := mergeScanner.Start(ctx); err != nil {
 		logger.Fatal("Failed to start merge scanner", zap.Error(err))
+	}
+	if triageScanner != nil {
+		if err := triageScanner.Start(ctx); err != nil {
+			logger.Fatal("Failed to start triage label scanner", zap.Error(err))
+		}
 	}
 
 	logger.Info("Scanners started")
@@ -377,6 +401,9 @@ func main() {
 	feedbackScanner.Stop()
 	cleanupScanner.Stop()
 	mergeScanner.Stop()
+	if triageScanner != nil {
+		triageScanner.Stop()
+	}
 
 	// Drain running jobs.
 	coordinator.Shutdown()
@@ -490,6 +517,37 @@ func buildInProgressCriteria(config *models.Config) models.SearchCriteria {
 		StatusByType:             inProgressByType,
 		ContributorIsCurrentUser: true,
 	}
+}
+
+// buildTriageCriteria constructs search criteria for the triage label
+// cleanup scanner. Returns false if no project has triage labels
+// configured.
+func buildTriageCriteria(config *models.Config) (models.SearchCriteria, bool) {
+	var projectKeys []string
+	var labels []string
+
+	for _, project := range config.Jira.Projects {
+		if len(project.TriageLabels.Active) == 0 {
+			continue
+		}
+		projectKeys = append(projectKeys, project.ProjectKeys...)
+		for _, label := range project.TriageLabels.Active {
+			labels = appendUnique(labels, label)
+		}
+	}
+
+	if len(projectKeys) == 0 || len(labels) == 0 {
+		return models.SearchCriteria{
+			ProjectKeys: []string{},
+			Labels:      []string{},
+		}, false
+	}
+
+	return models.SearchCriteria{
+		ProjectKeys: projectKeys,
+		Labels:      labels,
+		OrderBy:     "updated DESC",
+	}, true
 }
 
 // appendUnique appends value to slice only if not already present.

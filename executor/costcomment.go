@@ -162,7 +162,7 @@ func (p *Pipeline) postOrUpdateCostComment(
 	}
 	body := formatCostComment([]costEntry{{Label: label, Cost: cost}})
 
-	if err := p.git.PostIssueComment(owner, repo, prNumber, body); err != nil {
+	if _, err := p.git.PostIssueComment(owner, repo, prNumber, body); err != nil {
 		logger.Warn("Failed to post cost comment",
 			zap.String("owner", owner), zap.String("repo", repo),
 			zap.Int("pr_number", prNumber), zap.Error(err))
@@ -254,7 +254,7 @@ func (p *Pipeline) postCostCrossReference(logger *zap.Logger, ref *costCrossRef)
 		if findCostCrossRef(comments) != nil {
 			continue
 		}
-		if err := p.git.PostIssueComment(pr.owner, pr.repo, pr.number, body); err != nil {
+		if _, err := p.git.PostIssueComment(pr.owner, pr.repo, pr.number, body); err != nil {
 			logger.Warn("Failed to post cost cross-reference",
 				zap.String("repo", pr.repo), zap.Error(err))
 		}

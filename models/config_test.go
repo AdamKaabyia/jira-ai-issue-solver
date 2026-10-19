@@ -1907,6 +1907,9 @@ workspaces:
 		if vl.NonzeroExit != "" {
 			t.Errorf("NonzeroExit = %q, want empty", vl.NonzeroExit)
 		}
+		if vl.CostCapExceeded != nil {
+			t.Errorf("CostCapExceeded = %v, want nil", vl.CostCapExceeded)
+		}
 	})
 
 	t.Run("custom values", func(t *testing.T) {
@@ -1940,6 +1943,7 @@ jira:
       pr_validation_labels:
         validation_failed: "custom-vf"
         nonzero_exit: "custom-nze"
+        cost_cap_exceeded: "custom-cce"
 github:
   app_id: 123456
   private_key_path: "` + tmpKeyPath + `"
@@ -1968,6 +1972,70 @@ workspaces:
 		}
 		if vl.NonzeroExit != "custom-nze" {
 			t.Errorf("NonzeroExit = %q, want custom-nze", vl.NonzeroExit)
+		}
+		if vl.CostCapExceeded == nil || *vl.CostCapExceeded != "custom-cce" {
+			t.Errorf("CostCapExceeded = %v, want ptr to custom-cce", vl.CostCapExceeded)
+		}
+	})
+}
+
+func TestPRValidationLabels_CostCapLabel(t *testing.T) {
+	t.Run("nil pointer returns empty", func(t *testing.T) {
+		vl := PRValidationLabels{CostCapExceeded: nil}
+		if got := vl.CostCapLabel(); got != "" {
+			t.Errorf("CostCapLabel() = %q, want empty", got)
+		}
+	})
+
+	t.Run("empty string pointer returns empty", func(t *testing.T) {
+		empty := ""
+		vl := PRValidationLabels{CostCapExceeded: &empty}
+		if got := vl.CostCapLabel(); got != "" {
+			t.Errorf("CostCapLabel() = %q, want empty", got)
+		}
+	})
+
+	t.Run("non-empty pointer returns value", func(t *testing.T) {
+		label := "ai-budget-exceeded"
+		vl := PRValidationLabels{CostCapExceeded: &label}
+		if got := vl.CostCapLabel(); got != "ai-budget-exceeded" {
+			t.Errorf("CostCapLabel() = %q, want ai-budget-exceeded", got)
+		}
+	})
+}
+
+func TestPRValidationLabels_All_IncludesCostCap(t *testing.T) {
+	t.Run("includes cost cap label", func(t *testing.T) {
+		label := "ai-budget-exceeded"
+		vl := PRValidationLabels{
+			ValidationFailed: "vf",
+			NonzeroExit:      "nze",
+			CostCapExceeded:  &label,
+		}
+		got := vl.All()
+		want := []string{"vf", "nze", "ai-budget-exceeded"}
+		if len(got) != len(want) {
+			t.Fatalf("All() length = %d, want %d", len(got), len(want))
+		}
+		for i := range want {
+			if got[i] != want[i] {
+				t.Errorf("All()[%d] = %q, want %q", i, got[i], want[i])
+			}
+		}
+	})
+
+	t.Run("nil cost cap returns empty in slice", func(t *testing.T) {
+		vl := PRValidationLabels{
+			ValidationFailed: "vf",
+			NonzeroExit:      "nze",
+			CostCapExceeded:  nil,
+		}
+		got := vl.All()
+		if len(got) != 3 {
+			t.Fatalf("All() length = %d, want 3", len(got))
+		}
+		if got[2] != "" {
+			t.Errorf("All()[2] = %q, want empty", got[2])
 		}
 	})
 }
@@ -2079,4 +2147,132 @@ guardrails:
 			t.Errorf("MaxTicketCostUSD = %v, want 75.0 (from env)", config.Guardrails.MaxTicketCostUSD)
 		}
 	})
+}
+
+func TestProjectConfig_ValidateTriageLabels(t *testing.T) {
+	base := func() ProjectConfig {
+		return ProjectConfig{
+			ProjectKeys: ProjectKeys{"TEST"},
+			StatusTransitions: TicketTypeStatusTransitions{
+				"Bug": {Todo: "To Do", InProgress: "In Progress", InReview: "In Review"},
+			},
+			Components: ComponentMap{"c": ComponentConfig{Workspace: "default"}},
+			Workspaces: map[string]WorkspaceConfig{
+				"default": {Repos: []RepoEntry{{Name: "r", URL: "https://github.com/o/r.git", Profile: "p"}}},
+			},
+			Profiles: map[string]Profile{"p": {}},
+		}
+	}
+
+	tests := []struct {
+		name    string
+		triage  TriageLabels
+		wantErr string
+	}{
+		{
+			name:    "no triage config is valid",
+			triage:  TriageLabels{},
+			wantErr: "",
+		},
+		{
+			name:    "active set with empty new_status",
+			triage:  TriageLabels{Active: []string{"label1"}, Stale: "stale", NewStatus: ""},
+			wantErr: "triage_labels.new_status is required",
+		},
+		{
+			name:    "active set with empty stale",
+			triage:  TriageLabels{Active: []string{"label1"}, Stale: "", NewStatus: "New"},
+			wantErr: "triage_labels.stale is required",
+		},
+		{
+			name:    "active list contains empty string",
+			triage:  TriageLabels{Active: []string{"label1", ""}, Stale: "stale", NewStatus: "New"},
+			wantErr: "triage_labels.active must not contain empty strings",
+		},
+		{
+			name:    "stale overlaps active label",
+			triage:  TriageLabels{Active: []string{"label1", "label2"}, Stale: "label1", NewStatus: "New"},
+			wantErr: "triage_labels.stale",
+		},
+		{
+			name:    "stale overlaps active label case-insensitive",
+			triage:  TriageLabels{Active: []string{"Label1"}, Stale: "label1", NewStatus: "New"},
+			wantErr: "triage_labels.stale",
+		},
+		{
+			name:    "fully configured is valid",
+			triage:  TriageLabels{Active: []string{"label1", "label2"}, Stale: "stale", NewStatus: "New"},
+			wantErr: "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			pc := base()
+			pc.TriageLabels = tt.triage
+			err := pc.validate(0)
+			if tt.wantErr == "" {
+				if err != nil {
+					t.Errorf("validate() unexpected error: %v", err)
+				}
+			} else {
+				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+					t.Errorf("validate() error = %v, want error containing %q", err, tt.wantErr)
+				}
+			}
+		})
+	}
+}
+
+func TestFailureLabels_ExecutorOwnedCoversAllFields(t *testing.T) {
+	fl := FailureLabels{
+		CIFailing:       "ci",
+		Rejected:        "rej",
+		Blocked:         "blk",
+		ForkUserMissing: "fork",
+	}
+
+	wantExecutorOwned := map[string]bool{"blk": true, "fork": true}
+	wantScannerManaged := map[string]bool{"ci": true, "rej": true}
+
+	got := make(map[string]bool, len(fl.ExecutorOwned()))
+	for _, l := range fl.ExecutorOwned() {
+		if got[l] {
+			t.Errorf("ExecutorOwned() returned duplicate %q", l)
+		}
+		got[l] = true
+	}
+	if len(got) != len(wantExecutorOwned) {
+		t.Fatalf("ExecutorOwned() = %v, want %v", fl.ExecutorOwned(), wantExecutorOwned)
+	}
+	for l := range wantExecutorOwned {
+		if !got[l] {
+			t.Errorf("ExecutorOwned() missing %q", l)
+		}
+	}
+
+	wantAll := make(map[string]bool, len(wantExecutorOwned)+len(wantScannerManaged))
+	for l := range wantExecutorOwned {
+		wantAll[l] = true
+	}
+	for l := range wantScannerManaged {
+		wantAll[l] = true
+	}
+
+	allSet := make(map[string]bool, len(fl.All()))
+	for _, l := range fl.All() {
+		if allSet[l] {
+			t.Errorf("All() returned duplicate %q", l)
+		}
+		allSet[l] = true
+	}
+	if len(allSet) != len(wantAll) {
+		t.Fatalf("All()=%d, want %d: update wantExecutorOwned or wantScannerManaged when adding a new FailureLabels field",
+			len(allSet), len(wantAll))
+	}
+	for l := range wantAll {
+		if !allSet[l] {
+			t.Errorf("All() missing label %q", l)
+		}
+	}
 }

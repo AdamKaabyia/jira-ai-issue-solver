@@ -9,20 +9,25 @@ import (
 	"jira-ai-issue-solver/models"
 )
 
-// setFailureLabel applies the given failure label to a ticket and
-// removes the other configured failure labels (mutual exclusivity).
-// If targetLabel is empty, only clears the others. All operations are
-// best-effort: errors are logged but never propagated.
-func (p *Pipeline) setFailureLabel(
+// setPipelineLabel applies the given label to a ticket and removes all
+// other configured pipeline labels (both failure and lifecycle groups).
+// This enforces mutual exclusivity across both groups — a ticket should
+// have exactly one pipeline label at any time. No-op when targetLabel
+// is empty (not configured). All operations are best-effort: errors are
+// logged but never propagated.
+func (p *Pipeline) setPipelineLabel(
 	logger *zap.Logger,
 	ticketKey string,
-	fl models.FailureLabels,
+	allLabels []string,
 	targetLabel string,
 ) {
-	for _, label := range fl.All() {
+	if targetLabel == "" {
+		return
+	}
+	for _, label := range allLabels {
 		if label != "" && label != targetLabel {
 			if err := p.tracker.RemoveLabel(ticketKey, label); err != nil {
-				logger.Debug("Failed to remove failure label",
+				logger.Debug("Failed to remove pipeline label",
 					zap.String("label", label), zap.Error(err))
 			}
 		}
@@ -30,34 +35,7 @@ func (p *Pipeline) setFailureLabel(
 
 	if targetLabel != "" {
 		if err := p.tracker.AddLabel(ticketKey, targetLabel); err != nil {
-			logger.Warn("Failed to add failure label",
-				zap.String("label", targetLabel), zap.Error(err))
-		}
-	}
-}
-
-// setLifecycleLabel applies the given lifecycle label to a ticket and
-// removes the other configured lifecycle labels (mutual exclusivity).
-// If targetLabel is empty, only clears the others. All operations are
-// best-effort: errors are logged but never propagated.
-func (p *Pipeline) setLifecycleLabel(
-	logger *zap.Logger,
-	ticketKey string,
-	ll models.LifecycleLabels,
-	targetLabel string,
-) {
-	for _, label := range ll.All() {
-		if label != "" && label != targetLabel {
-			if err := p.tracker.RemoveLabel(ticketKey, label); err != nil {
-				logger.Debug("Failed to remove lifecycle label",
-					zap.String("label", label), zap.Error(err))
-			}
-		}
-	}
-
-	if targetLabel != "" {
-		if err := p.tracker.AddLabel(ticketKey, targetLabel); err != nil {
-			logger.Warn("Failed to add lifecycle label",
+			logger.Warn("Failed to add pipeline label",
 				zap.String("label", targetLabel), zap.Error(err))
 		}
 	}
@@ -83,7 +61,8 @@ func (p *Pipeline) validateForkMode(
 	}
 
 	if settings.FailureLabels.ForkUserMissing != "" {
-		p.setFailureLabel(logger, ticketKey, settings.FailureLabels, settings.FailureLabels.ForkUserMissing)
+		allLabels := models.AllPipelineLabels(settings.FailureLabels, settings.LifecycleLabels)
+		p.setPipelineLabel(logger, ticketKey, allLabels, settings.FailureLabels.ForkUserMissing)
 	}
 
 	if !settings.DisableErrorComments {
@@ -103,15 +82,18 @@ func (p *Pipeline) validateForkMode(
 	return errors.New("fork mode requires assignee GitHub mapping: ticket assignee has no entry in jira.assignee_to_github_username")
 }
 
-// clearFailureLabels removes all configured failure labels from a
+// clearFailureLabels removes executor-managed failure labels from a
 // ticket. Called on pipeline success paths to clean up labels from
-// prior failed attempts. All operations are best-effort.
+// prior failed attempts. Only clears labels the executor owns
+// (blocked, fork_user_missing); scanner-managed labels (ci_failing,
+// rejected) are left for the feedback scanner to reconcile based on
+// observed PR/CI state. All operations are best-effort.
 func (p *Pipeline) clearFailureLabels(
 	logger *zap.Logger,
 	ticketKey string,
 	fl models.FailureLabels,
 ) {
-	for _, label := range fl.All() {
+	for _, label := range fl.ExecutorOwned() {
 		if label != "" {
 			if err := p.tracker.RemoveLabel(ticketKey, label); err != nil {
 				logger.Debug("Failed to remove failure label",
@@ -168,6 +150,51 @@ func (p *Pipeline) clearPRValidationLabels(
 				logger.Debug("Failed to remove PR validation label",
 					zap.String("owner", owner), zap.String("repo", repo),
 					zap.Int("pr", prNumber), zap.String("label", label),
+					zap.Error(err))
+			}
+		}
+	}
+}
+
+// applyCostCapPRLabel applies or removes the cost-cap-exceeded label
+// on all open PRs for the given ticket across all configured repos.
+// When exceeded is true, the label is set and other validation labels
+// are removed (mutual exclusivity). When exceeded is false, only the
+// cost cap label is removed. All operations are best-effort.
+func (p *Pipeline) applyCostCapPRLabel(
+	logger *zap.Logger,
+	ticketKey string,
+	settings *models.ProjectSettings,
+	exceeded bool,
+) {
+	label := settings.PRValidationLabels.CostCapLabel()
+	if label == "" {
+		return
+	}
+
+	branchName := fmt.Sprintf("%s/%s", p.cfg.BotUsername, ticketKey)
+	heads := settings.PRHeads(branchName)
+
+	for _, repo := range settings.Repos {
+		pr, err := p.findPRByHeadsOptional(repo.Owner, repo.Repo, heads)
+		if err != nil {
+			logger.Debug("Failed to find PR for cost cap label",
+				zap.String("repo", repo.Owner+"/"+repo.Repo),
+				zap.Error(err))
+			continue
+		}
+		if pr == nil {
+			continue
+		}
+
+		if exceeded {
+			p.setPRValidationLabel(logger, repo.Owner, repo.Repo,
+				pr.Number, settings.PRValidationLabels, label)
+		} else {
+			if err := p.git.RemovePRLabel(repo.Owner, repo.Repo, pr.Number, label); err != nil {
+				logger.Debug("Failed to remove cost cap PR label",
+					zap.String("repo", repo.Owner+"/"+repo.Repo),
+					zap.Int("pr", pr.Number),
 					zap.Error(err))
 			}
 		}

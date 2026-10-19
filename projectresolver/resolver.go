@@ -74,6 +74,12 @@ func (r *ConfigResolver) ResolveProject(workItem models.WorkItem) (*models.Proje
 		maxTicketCost = *pc.MaxTicketCostUSD
 	}
 
+	prVL := pc.PRValidationLabels
+	if prVL.CostCapExceeded == nil {
+		defaultLabel := models.DefaultCostCapLabel
+		prVL.CostCapExceeded = &defaultLabel
+	}
+
 	return &models.ProjectSettings{
 		Repos:                repos,
 		RootRepoURL:          ws.RootRepo,
@@ -86,7 +92,7 @@ func (r *ConfigResolver) ResolveProject(workItem models.WorkItem) (*models.Proje
 		Container:            ws.Container,
 		FailureLabels:        pc.FailureLabels,
 		LifecycleLabels:      pc.LifecycleLabels,
-		PRValidationLabels:   pc.PRValidationLabels,
+		PRValidationLabels:   prVL,
 		MergedStatus:         transitions.Merged,
 		ForkMode:             pc.ForkMode,
 		GitHubUsername:       ghUsername,
@@ -216,6 +222,17 @@ func (r *ConfigResolver) ResolveLifecycleLabels(item models.WorkItem) models.Lif
 		return models.LifecycleLabels{}
 	}
 	return pc.LifecycleLabels
+}
+
+// ResolveTriageLabels returns the triage label configuration for the
+// given work item's project. Returns a zero-value TriageLabels (no
+// cleanup configured) if the project cannot be resolved.
+func (r *ConfigResolver) ResolveTriageLabels(item models.WorkItem) models.TriageLabels {
+	pc, err := r.findProjectConfig(item)
+	if err != nil {
+		return models.TriageLabels{}
+	}
+	return pc.TriageLabels
 }
 
 // ResolveMergedStatus returns the merged status transition for the

@@ -407,3 +407,162 @@ func mergeJob(ticketKey string) *jobmanager.Job {
 		AttemptNum: 1,
 	}
 }
+
+// --- Command reply lifecycle ---
+
+func TestExecuteMerge_CommandSource_PostsAndUpdatesReply(t *testing.T) {
+	d := newTestDeps(t)
+	d.git.GetPRForBranchFunc = mergePRFunc()
+	d.git.MergeBaseFunc = func(_, _, _ string) ([]string, error) {
+		return []string{}, nil
+	}
+	d.git.HasChangesFunc = func(_, _ string) (bool, error) {
+		return true, nil
+	}
+	d.git.CommitChangesFunc = func(_, _, _, _, _, _, _ string, _ *models.Author, _ []string, _ bool) (string, error) {
+		return "abc123", nil
+	}
+
+	var postedBody string
+	d.git.PostIssueCommentFunc = func(_, _ string, _ int, body string) (int64, error) {
+		postedBody = body
+		return 999, nil
+	}
+	var updatedID int64
+	var updatedBody string
+	d.git.UpdateIssueCommentFunc = func(_, _ string, id int64, body string) error {
+		updatedID = id
+		updatedBody = body
+		return nil
+	}
+
+	p := d.pipeline(t)
+	job := mergeJob("PROJ-1")
+	job.CommandSource = &jobmanager.CommandSource{
+		Owner:     "org",
+		Repo:      "repo",
+		PRNumber:  42,
+		CommentID: 100,
+	}
+
+	_, err := p.Execute(context.Background(), job)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if !strings.Contains(postedBody, "Merging from main") {
+		t.Errorf("expected initial reply with merge message, got %q", postedBody)
+	}
+	if !strings.Contains(postedBody, "<!-- addressed: 100 -->") {
+		t.Errorf("expected addressed marker in initial reply, got %q", postedBody)
+	}
+	if updatedID != 999 {
+		t.Errorf("expected update on reply comment 999, got %d", updatedID)
+	}
+	if !strings.Contains(updatedBody, "Successfully merged") {
+		t.Errorf("expected success message in updated reply, got %q", updatedBody)
+	}
+	if !strings.Contains(updatedBody, "abc123") {
+		t.Errorf("expected commit SHA in updated reply, got %q", updatedBody)
+	}
+}
+
+func TestExecuteMerge_CommandSource_FailureUpdatesReply(t *testing.T) {
+	d := newTestDeps(t)
+	d.git.GetPRForBranchFunc = func(_, _, _ string) (*models.PRDetails, error) {
+		return nil, nil
+	}
+
+	d.git.PostIssueCommentFunc = func(_, _ string, _ int, _ string) (int64, error) {
+		return 999, nil
+	}
+	var updatedBody string
+	d.git.UpdateIssueCommentFunc = func(_, _ string, _ int64, body string) error {
+		updatedBody = body
+		return nil
+	}
+
+	p := d.pipeline(t)
+	job := mergeJob("PROJ-1")
+	job.CommandSource = &jobmanager.CommandSource{
+		Owner:     "org",
+		Repo:      "repo",
+		PRNumber:  42,
+		CommentID: 100,
+	}
+
+	_, err := p.Execute(context.Background(), job)
+	if err == nil {
+		t.Fatal("expected error when no PR found")
+	}
+
+	if !strings.Contains(updatedBody, "Failed to merge") {
+		t.Errorf("expected failure message in updated reply, got %q", updatedBody)
+	}
+}
+
+func TestExecuteMerge_NoCommandSource_NoReply(t *testing.T) {
+	d := newTestDeps(t)
+	d.git.GetPRForBranchFunc = mergePRFunc()
+	d.git.MergeBaseFunc = func(_, _, _ string) ([]string, error) {
+		return []string{}, nil
+	}
+	d.git.HasChangesFunc = func(_, _ string) (bool, error) {
+		return true, nil
+	}
+	d.git.CommitChangesFunc = func(_, _, _, _, _, _, _ string, _ *models.Author, _ []string, _ bool) (string, error) {
+		return "abc123", nil
+	}
+
+	commentPosted := false
+	d.git.PostIssueCommentFunc = func(_, _ string, _ int, _ string) (int64, error) {
+		commentPosted = true
+		return 0, nil
+	}
+
+	p := d.pipeline(t)
+	job := mergeJob("PROJ-1")
+
+	_, err := p.Execute(context.Background(), job)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if commentPosted {
+		t.Error("expected no comment post when CommandSource is nil")
+	}
+}
+
+func TestExecuteMerge_CommandSource_PreflightFailure_PostsAddressedReply(t *testing.T) {
+	d := newTestDeps(t)
+	d.tracker.GetWorkItemFunc = func(_ string) (*models.WorkItem, error) {
+		return nil, fmt.Errorf("ticket not found")
+	}
+
+	var postedBody string
+	d.git.PostIssueCommentFunc = func(_, _ string, _ int, body string) (int64, error) {
+		postedBody = body
+		return 999, nil
+	}
+
+	p := d.pipeline(t)
+	job := mergeJob("PROJ-1")
+	job.CommandSource = &jobmanager.CommandSource{
+		Owner:     "org",
+		Repo:      "repo",
+		PRNumber:  42,
+		CommentID: 100,
+	}
+
+	_, err := p.Execute(context.Background(), job)
+	if err == nil {
+		t.Fatal("expected error from preflight failure")
+	}
+
+	if !strings.Contains(postedBody, "<!-- addressed: 100 -->") {
+		t.Errorf("expected addressed marker in preflight failure reply, got %q", postedBody)
+	}
+	if !strings.Contains(postedBody, "Failed") {
+		t.Errorf("expected failure message in preflight reply, got %q", postedBody)
+	}
+}
