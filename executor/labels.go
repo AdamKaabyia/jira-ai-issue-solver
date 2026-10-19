@@ -82,15 +82,18 @@ func (p *Pipeline) validateForkMode(
 	return errors.New("fork mode requires assignee GitHub mapping: ticket assignee has no entry in jira.assignee_to_github_username")
 }
 
-// clearFailureLabels removes all configured failure labels from a
+// clearFailureLabels removes executor-managed failure labels from a
 // ticket. Called on pipeline success paths to clean up labels from
-// prior failed attempts. All operations are best-effort.
+// prior failed attempts. Only clears labels the executor owns
+// (blocked, fork_user_missing); scanner-managed labels (ci_failing,
+// rejected) are left for the feedback scanner to reconcile based on
+// observed PR/CI state. All operations are best-effort.
 func (p *Pipeline) clearFailureLabels(
 	logger *zap.Logger,
 	ticketKey string,
 	fl models.FailureLabels,
 ) {
-	for _, label := range fl.All() {
+	for _, label := range fl.ExecutorOwned() {
 		if label != "" {
 			if err := p.tracker.RemoveLabel(ticketKey, label); err != nil {
 				logger.Debug("Failed to remove failure label",

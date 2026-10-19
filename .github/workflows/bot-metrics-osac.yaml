@@ -33,7 +33,7 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           BOT_AUTHOR: 'app/osac-jira-ai-issue-solver'
-          TARGET_REPOS: 'osac-project/fulfillment-service,osac-project/osac-operator,osac-project/osac-aap,osac-project/osac-installer'
+          TARGET_REPOS: 'osac-project/osac,osac-project/osac-ui'
           JIRA_PROJECTS: ${{ inputs.jira_projects || 'OSAC' }}
           EXCLUDED_TICKETS: ${{ inputs.excluded_tickets || '' }}
           START_DATE: ${{ inputs.start_date || '2026-05-17' }}

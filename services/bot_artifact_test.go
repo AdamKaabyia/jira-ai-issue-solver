@@ -21,11 +21,12 @@ func TestIsExcludedPath(t *testing.T) {
 		{".artifacts/", true},
 		{".artifacts/bugfix/diagnosis.md", true},
 
-		// .ai-bot is repo config, NOT excluded
-		{".ai-bot", false},
-		{".ai-bot/", false},
-		{".ai-bot/config.yaml", false},
-		{".ai-bot/instructions.md", false},
+		// Built-in .ai-bot prefix exclusion
+		{".ai-bot", true},
+		{".ai-bot/", true},
+		{".ai-bot/config.yaml", true},
+		{".ai-bot/instructions.md", true},
+		{".ai-bot.preserve/config.yaml", true},
 
 		// Not excluded
 		{"src/main.go", false},
@@ -53,9 +54,9 @@ func TestIsExcludedPath_NoImportExcludes(t *testing.T) {
 		t.Error("expected .ai-session/task.md to be excluded even with no import excludes")
 	}
 
-	// .ai-bot is NOT excluded — it's repo config, not bot artifacts
-	if isExcludedPath(".ai-bot/config.yaml", excludes) {
-		t.Error("expected .ai-bot/config.yaml to NOT be excluded")
+	// .ai-bot is always excluded (builtin)
+	if !isExcludedPath(".ai-bot/config.yaml", excludes) {
+		t.Error("expected .ai-bot/config.yaml to be excluded even with no import excludes")
 	}
 
 	// .artifacts is NOT excluded when not declared by imports

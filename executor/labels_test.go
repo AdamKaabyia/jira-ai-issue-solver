@@ -163,7 +163,7 @@ func TestSetPipelineLabel(t *testing.T) {
 }
 
 func TestClearFailureLabels(t *testing.T) {
-	t.Run("removes all configured labels", func(t *testing.T) {
+	t.Run("removes only executor-owned labels", func(t *testing.T) {
 		fl := models.FailureLabels{
 			CIFailing:       "ci-fail",
 			Rejected:        "rejected",
@@ -177,13 +177,16 @@ func TestClearFailureLabels(t *testing.T) {
 		p := d.pipeline(t)
 		executor.ClearFailureLabels(p, zap.NewNop(), "TEST-1", fl)
 
-		if len(removed) != 4 {
-			t.Fatalf("removed = %v, want 4 entries", removed)
+		if len(removed) != 2 {
+			t.Fatalf("removed = %v, want 2 entries (blocked + fork-missing)", removed)
 		}
-		want := map[string]bool{"ci-fail": true, "rejected": true, "blocked": true, "fork-missing": true}
+		counts := make(map[string]int, len(removed))
 		for _, l := range removed {
-			if !want[l] {
-				t.Errorf("unexpected removal of %q", l)
+			counts[l]++
+		}
+		for _, want := range []string{"blocked", "fork-missing"} {
+			if counts[want] != 1 {
+				t.Errorf("expected exactly 1 removal of %q, got %d", want, counts[want])
 			}
 		}
 	})

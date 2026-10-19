@@ -409,6 +409,14 @@ func (fl FailureLabels) All() []string {
 	return []string{fl.CIFailing, fl.Rejected, fl.Blocked, fl.ForkUserMissing}
 }
 
+// ExecutorOwned returns failure labels managed by the executor
+// (blocked, fork_user_missing). Scanner-managed labels (ci_failing,
+// rejected) are excluded — the scanner reconciles those based on
+// observed PR/CI state.
+func (fl FailureLabels) ExecutorOwned() []string {
+	return []string{fl.Blocked, fl.ForkUserMissing}
+}
+
 // LifecycleLabels holds optional Jira label names that track ticket
 // progression through the autofix pipeline. Labels are mutually
 // exclusive: setting one removes the others. Empty strings disable

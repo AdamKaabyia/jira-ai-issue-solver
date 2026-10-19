@@ -2320,3 +2320,56 @@ func TestProjectConfig_ValidateTriageLabels(t *testing.T) {
 		})
 	}
 }
+
+func TestFailureLabels_ExecutorOwnedCoversAllFields(t *testing.T) {
+	fl := FailureLabels{
+		CIFailing:       "ci",
+		Rejected:        "rej",
+		Blocked:         "blk",
+		ForkUserMissing: "fork",
+	}
+
+	wantExecutorOwned := map[string]bool{"blk": true, "fork": true}
+	wantScannerManaged := map[string]bool{"ci": true, "rej": true}
+
+	got := make(map[string]bool, len(fl.ExecutorOwned()))
+	for _, l := range fl.ExecutorOwned() {
+		if got[l] {
+			t.Errorf("ExecutorOwned() returned duplicate %q", l)
+		}
+		got[l] = true
+	}
+	if len(got) != len(wantExecutorOwned) {
+		t.Fatalf("ExecutorOwned() = %v, want %v", fl.ExecutorOwned(), wantExecutorOwned)
+	}
+	for l := range wantExecutorOwned {
+		if !got[l] {
+			t.Errorf("ExecutorOwned() missing %q", l)
+		}
+	}
+
+	wantAll := make(map[string]bool, len(wantExecutorOwned)+len(wantScannerManaged))
+	for l := range wantExecutorOwned {
+		wantAll[l] = true
+	}
+	for l := range wantScannerManaged {
+		wantAll[l] = true
+	}
+
+	allSet := make(map[string]bool, len(fl.All()))
+	for _, l := range fl.All() {
+		if allSet[l] {
+			t.Errorf("All() returned duplicate %q", l)
+		}
+		allSet[l] = true
+	}
+	if len(allSet) != len(wantAll) {
+		t.Fatalf("All()=%d, want %d: update wantExecutorOwned or wantScannerManaged when adding a new FailureLabels field",
+			len(allSet), len(wantAll))
+	}
+	for l := range wantAll {
+		if !allSet[l] {
+			t.Errorf("All() missing label %q", l)
+		}
+	}
+}

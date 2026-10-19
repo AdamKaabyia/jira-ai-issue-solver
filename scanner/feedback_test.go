@@ -1061,6 +1061,12 @@ func TestFeedbackScanner_FailureLabels_CIFailing(t *testing.T) {
 
 func TestFeedbackScanner_FailureLabels_CIFailing_ClearsLifecycleLabels(t *testing.T) {
 	d := newFeedbackDeps()
+	d.searcher.SearchWorkItemsFunc = func(_ models.SearchCriteria) ([]models.WorkItem, error) {
+		return []models.WorkItem{{
+			Key:    "PROJ-1",
+			Labels: []string{"blocked", "jira-autofix", "jira-autofix-review"},
+		}}, nil
+	}
 	d.prs.GetPRCommentsFunc = func(_, _ string, _ int, _ time.Time) ([]models.PRComment, error) {
 		return []models.PRComment{}, nil
 	}
@@ -1112,6 +1118,9 @@ func TestFeedbackScanner_FailureLabels_CIFailing_ClearsLifecycleLabels(t *testin
 
 func TestFeedbackScanner_FailureLabels_CIPassing(t *testing.T) {
 	d := newFeedbackDeps()
+	d.searcher.SearchWorkItemsFunc = func(_ models.SearchCriteria) ([]models.WorkItem, error) {
+		return []models.WorkItem{{Key: "PROJ-1", Labels: []string{"ci-fail"}}}, nil
+	}
 	d.prs.GetPRCommentsFunc = func(_, _ string, _ int, _ time.Time) ([]models.PRComment, error) {
 		return []models.PRComment{}, nil
 	}
@@ -1180,6 +1189,12 @@ func TestFeedbackScanner_FailureLabels_CIFailing_EmptyLabel(t *testing.T) {
 
 func TestFeedbackScanner_FailureLabels_CIRecovery_RestoresReview(t *testing.T) {
 	d := newFeedbackDeps()
+	d.searcher.SearchWorkItemsFunc = func(_ models.SearchCriteria) ([]models.WorkItem, error) {
+		return []models.WorkItem{{
+			Key:    "PROJ-1",
+			Labels: []string{"ci-fail", "blocked", "jira-autofix"},
+		}}, nil
+	}
 	d.prs.GetPRCommentsFunc = func(_, _ string, _ int, _ time.Time) ([]models.PRComment, error) {
 		return []models.PRComment{}, nil
 	}
@@ -1374,6 +1389,9 @@ func TestFeedbackScanner_FailureLabels_Rejected_MultiRepo_ErrorOnOneRepo(t *test
 
 func TestFeedbackScanner_FailureLabels_CIErrorPreservesLabel(t *testing.T) {
 	d := newFeedbackDeps()
+	d.searcher.SearchWorkItemsFunc = func(_ models.SearchCriteria) ([]models.WorkItem, error) {
+		return []models.WorkItem{{Key: "PROJ-1", Labels: []string{"ci-fail"}}}, nil
+	}
 	d.prs.GetPRCommentsFunc = func(_, _ string, _ int, _ time.Time) ([]models.PRComment, error) {
 		return []models.PRComment{}, nil
 	}
@@ -1401,6 +1419,82 @@ func TestFeedbackScanner_FailureLabels_CIErrorPreservesLabel(t *testing.T) {
 
 	if labelRemoved {
 		t.Error("ci-failing label should be preserved when CI query errors")
+	}
+}
+
+func TestFeedbackScanner_FailureLabels_Idempotent_NoAPICallsWhenCorrect(t *testing.T) {
+	d := newFeedbackDeps()
+	d.searcher.SearchWorkItemsFunc = func(_ models.SearchCriteria) ([]models.WorkItem, error) {
+		return []models.WorkItem{{
+			Key:    "PROJ-1",
+			Labels: []string{"ci-fail"},
+		}}, nil
+	}
+	d.prs.GetPRCommentsFunc = func(_, _ string, _ int, _ time.Time) ([]models.PRComment, error) {
+		return []models.PRComment{}, nil
+	}
+	d.prs.GetPRForBranchFunc = func(_, _, _ string) (*models.PRDetails, error) {
+		return &models.PRDetails{Number: 1, HeadSHA: "abc123"}, nil
+	}
+	d.ci = &scannertest.StubCIChecker{
+		ListCheckRunsForRefFunc: func(_, _, _ string) ([]models.CheckRunFailure, bool, error) {
+			return []models.CheckRunFailure{{Name: "build"}}, true, nil
+		},
+	}
+	d.cfg.MaxCIFixAttempts = 0
+
+	var added, removed []string
+	d.labels = &scannertest.StubLabelManager{
+		AddLabelFunc:    func(_, label string) error { added = append(added, label); return nil },
+		RemoveLabelFunc: func(_, label string) error { removed = append(removed, label); return nil },
+	}
+	d.labelResolver = &scannertest.StubFailureLabelResolver{
+		ResolveFailureLabelsFunc: func(_ models.WorkItem) models.FailureLabels {
+			return models.FailureLabels{CIFailing: "ci-fail", Blocked: "blocked"}
+		},
+	}
+
+	runOneFeedbackScan(t, d.scanner(t))
+
+	if len(added) != 0 {
+		t.Errorf("added = %v, want empty (ci-fail already present)", added)
+	}
+	if len(removed) != 0 {
+		t.Errorf("removed = %v, want empty (no stale labels to remove)", removed)
+	}
+}
+
+func TestFeedbackScanner_FailureLabels_CIPassing_NoOpWhenLabelAbsent(t *testing.T) {
+	d := newFeedbackDeps()
+	d.searcher.SearchWorkItemsFunc = func(_ models.SearchCriteria) ([]models.WorkItem, error) {
+		return []models.WorkItem{{Key: "PROJ-1", Labels: []string{}}}, nil
+	}
+	d.prs.GetPRCommentsFunc = func(_, _ string, _ int, _ time.Time) ([]models.PRComment, error) {
+		return []models.PRComment{}, nil
+	}
+	d.prs.GetPRForBranchFunc = func(_, _, _ string) (*models.PRDetails, error) {
+		return &models.PRDetails{Number: 1, HeadSHA: "abc123"}, nil
+	}
+	d.ci = &scannertest.StubCIChecker{
+		ListCheckRunsForRefFunc: func(_, _, _ string) ([]models.CheckRunFailure, bool, error) {
+			return []models.CheckRunFailure{}, true, nil
+		},
+	}
+
+	var removed []string
+	d.labels = &scannertest.StubLabelManager{
+		RemoveLabelFunc: func(_, label string) error { removed = append(removed, label); return nil },
+	}
+	d.labelResolver = &scannertest.StubFailureLabelResolver{
+		ResolveFailureLabelsFunc: func(_ models.WorkItem) models.FailureLabels {
+			return models.FailureLabels{CIFailing: "ci-fail"}
+		},
+	}
+
+	runOneFeedbackScan(t, d.scanner(t))
+
+	if len(removed) != 0 {
+		t.Errorf("removed = %v, want empty (ci-fail not present, no remove needed)", removed)
 	}
 }
 
@@ -1465,6 +1559,12 @@ func TestFeedbackScanner_FailureLabels_MultiRepo_ActionableAndCIFailing(t *testi
 
 func TestFeedbackScanner_LifecycleLabels_Merged(t *testing.T) {
 	d := newFeedbackDeps()
+	d.searcher.SearchWorkItemsFunc = func(_ models.SearchCriteria) ([]models.WorkItem, error) {
+		return []models.WorkItem{{
+			Key:    "PROJ-1",
+			Labels: []string{"jira-autofix", "jira-autofix-review"},
+		}}, nil
+	}
 	// No open PR.
 	d.prs.GetPRForBranchFunc = func(_, _, _ string) (*models.PRDetails, error) {
 		return nil, nil
@@ -1512,6 +1612,12 @@ func TestFeedbackScanner_LifecycleLabels_Merged(t *testing.T) {
 
 func TestFeedbackScanner_LifecycleLabels_Merged_ClearsFailureLabels(t *testing.T) {
 	d := newFeedbackDeps()
+	d.searcher.SearchWorkItemsFunc = func(_ models.SearchCriteria) ([]models.WorkItem, error) {
+		return []models.WorkItem{{
+			Key:    "PROJ-1",
+			Labels: []string{"ci-fail", "blocked", "jira-autofix", "jira-autofix-review"},
+		}}, nil
+	}
 	d.prs.GetPRForBranchFunc = func(_, _, _ string) (*models.PRDetails, error) {
 		return nil, nil
 	}
